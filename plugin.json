@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "shop-demo",
   "name": "Shop (demo)",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The reference shop, installed from its own repository \u2014 the S7 drive.",
   "applicationType": "plugin_shop_demo",
   "entry": "app",
@@ -58,7 +58,7 @@
       "scope": "instance",
       "fields": {
         "name": "string",
-        "priceCents": "int",
+        "priceCents": "float",
         "sku": "string?",
         "active": "boolean=true",
         "description": "text?"
