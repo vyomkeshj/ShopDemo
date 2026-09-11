@@ -1,0 +1,143 @@
+{
+  "manifestVersion": 1,
+  "id": "shop-demo",
+  "name": "Shop (demo)",
+  "version": "0.1.0",
+  "description": "The reference shop, installed from its own repository \u2014 the S7 drive.",
+  "applicationType": "plugin_shop_demo",
+  "entry": "app",
+  "icon": "ShoppingBag",
+  "roles": {
+    "vocabulary": [
+      "customer",
+      "staff",
+      "owner"
+    ],
+    "default": {
+      "owner": "owner",
+      "member-edit": "staff",
+      "member-readonly": "staff",
+      "visitor": "customer",
+      "anonymous": "customer",
+      "agent": "inherit"
+    },
+    "describe": {
+      "customer": "browses the catalogue, places orders and sees their own",
+      "staff": "sees and fulfils every order; never the customer's address book",
+      "owner": "everything, including prices"
+    }
+  },
+  "ops": {
+    "browse": {
+      "access": "public"
+    },
+    "place-order": {
+      "access": "public",
+      "requires": "account"
+    },
+    "list-orders": {
+      "access": "public",
+      "requires": "account"
+    },
+    "refund": {},
+    "add-product": {},
+    "fulfil-order": {}
+  },
+  "routes": {
+    "order-updates": {
+      "access": "read"
+    }
+  },
+  "kickableTasks": {
+    "fulfil": {
+      "access": "write"
+    }
+  },
+  "db": {
+    "Product": {
+      "scope": "instance",
+      "fields": {
+        "name": "string",
+        "priceCents": "int",
+        "sku": "string?",
+        "active": "boolean=true"
+      },
+      "unique": [
+        [
+          "sku"
+        ]
+      ],
+      "indexes": [
+        [
+          "active"
+        ]
+      ],
+      "rules": {
+        "read": "anyone",
+        "write": [
+          "owner"
+        ]
+      }
+    },
+    "Order": {
+      "scope": "instance",
+      "owner": "creator",
+      "fields": {
+        "status": "string=new",
+        "totalCents": "int",
+        "lines": "json",
+        "shipTo": "json",
+        "note": "text?",
+        "product": "ref:Product?"
+      },
+      "indexes": [
+        [
+          "status"
+        ],
+        [
+          "createdAt"
+        ],
+        [
+          "product"
+        ]
+      ],
+      "rules": {
+        "read": [
+          "creator",
+          "staff",
+          "owner"
+        ],
+        "create": {
+          "roles": [
+            "customer",
+            "staff",
+            "owner"
+          ],
+          "requires": "account"
+        },
+        "update": {
+          "roles": [
+            "staff",
+            "owner"
+          ],
+          "creatorMay": [
+            "note"
+          ]
+        },
+        "delete": [
+          "owner"
+        ]
+      }
+    },
+    "Address": {
+      "scope": "user",
+      "fields": {
+        "label": "string",
+        "lines": "json"
+      },
+      "sealed": [
+        "lines"
+      ]
+    }
+  }
+}

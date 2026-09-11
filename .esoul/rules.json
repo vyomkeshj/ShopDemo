@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "pluginId": "shop-demo",
+  "models": {
+    "Product": {
+      "name": "Product",
+      "key": "product",
+      "scope": "instance",
+      "ownedByCreator": false,
+      "fields": {
+        "name": {
+          "type": "string",
+          "optional": false,
+          "list": false
+        },
+        "priceCents": {
+          "type": "int",
+          "optional": false,
+          "list": false
+        },
+        "sku": {
+          "type": "string",
+          "optional": true,
+          "list": false
+        },
+        "active": {
+          "type": "boolean",
+          "optional": false,
+          "list": false,
+          "default": true
+        }
+      },
+      "sealed": [],
+      "unique": [
+        [
+          "sku"
+        ]
+      ],
+      "indexes": [
+        [
+          "active"
+        ]
+      ],
+      "filterable": [
+        "active",
+        "createdAt",
+        "id",
+        "ownerId",
+        "sku"
+      ],
+      "rules": {
+        "read": {
+          "principals": [
+            {
+              "t": "anyone"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "create": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "update": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "delete": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        }
+      }
+    },
+    "Order": {
+      "name": "Order",
+      "key": "order",
+      "scope": "instance",
+      "ownedByCreator": true,
+      "fields": {
+        "status": {
+          "type": "string",
+          "optional": false,
+          "list": false,
+          "default": "new"
+        },
+        "totalCents": {
+          "type": "int",
+          "optional": false,
+          "list": false
+        },
+        "lines": {
+          "type": "json",
+          "optional": false,
+          "list": false
+        },
+        "shipTo": {
+          "type": "json",
+          "optional": false,
+          "list": false
+        },
+        "note": {
+          "type": "text",
+          "optional": true,
+          "list": false
+        },
+        "product": {
+          "type": "ref",
+          "optional": true,
+          "list": false,
+          "ref": "Product"
+        }
+      },
+      "sealed": [],
+      "unique": [],
+      "indexes": [
+        [
+          "status"
+        ],
+        [
+          "createdAt"
+        ],
+        [
+          "product"
+        ]
+      ],
+      "filterable": [
+        "createdAt",
+        "id",
+        "ownerId",
+        "product",
+        "status"
+      ],
+      "rules": {
+        "read": {
+          "principals": [
+            {
+              "t": "creator"
+            },
+            {
+              "t": "role",
+              "role": "staff"
+            },
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "create": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "customer"
+            },
+            {
+              "t": "role",
+              "role": "staff"
+            },
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": true,
+          "creatorMay": null,
+          "fields": null
+        },
+        "update": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "staff"
+            },
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": [
+            "note"
+          ],
+          "fields": null
+        },
+        "delete": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        }
+      }
+    },
+    "Address": {
+      "name": "Address",
+      "key": "address",
+      "scope": "user",
+      "ownedByCreator": false,
+      "fields": {
+        "label": {
+          "type": "string",
+          "optional": false,
+          "list": false
+        },
+        "lines": {
+          "type": "json",
+          "optional": false,
+          "list": false
+        }
+      },
+      "sealed": [
+        "lines"
+      ],
+      "unique": [],
+      "indexes": [],
+      "filterable": [
+        "createdAt",
+        "id",
+        "ownerId"
+      ],
+      "rules": {
+        "read": {
+          "principals": [],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "create": {
+          "principals": [],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "update": {
+          "principals": [],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "delete": {
+          "principals": [],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        }
+      }
+    }
+  }
+}
