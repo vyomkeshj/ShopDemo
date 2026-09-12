@@ -14,6 +14,7 @@
 import { fakeViewer, memoryDb, runOp } from "esoul-sdk/testing";
 import manifest from "./plugin.json";
 import { pluginServer } from "./server";
+import { pluginSchema } from "./app";
 
 const owner = fakeViewer("owner", { userId: "kp_o", role: "owner" });
 const shopper = fakeViewer("anonymous", { role: "customer" });
@@ -135,5 +136,32 @@ describe("adding a product records the catalogue change", () => {
       db: db.as(owner),
     })) as { emitted: { eventName: string }[] };
     expect(run2.emitted.some((e) => e.eventName.endsWith("catalogue_changed"))).toBe(true);
+  });
+});
+
+/**
+ * WHAT `catalogueVersion` MEANS.
+ *
+ * Every open storefront watches it to re-read the shelves. Three tools used to
+ * bump it: add-product (twice, once from the tool and once from the op, with a
+ * random id the reducer could not dedupe) and both order tools, for something
+ * that never touched the catalogue. At a thousand orders a day that is a
+ * thousand catalogue refetches on every shopper's open page (2026-09-12).
+ */
+describe("only a catalogue change is a catalogue change", () => {
+  const toolkit = () => {
+    const dispatched: { eventName: string }[] = [];
+    const tools = pluginSchema.toolkitCreator!(
+      { workspaceId: "w", nodeId: "n", instanceName: "Shop", applicationType: "plugin_shop_demo" } as never,
+      undefined as never,
+      ((e: { eventName: string }) => dispatched.push(e)) as never,
+    ) as Record<string, { execute: (a: unknown) => Promise<unknown> }>;
+    return { tools, dispatched };
+  };
+
+  it("no tool dispatches an event of its own — the op owns the timeline", () => {
+    const { tools, dispatched } = toolkit();
+    expect(Object.keys(tools).length).toBeGreaterThan(5);
+    expect(dispatched).toEqual([]);
   });
 });

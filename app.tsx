@@ -345,7 +345,11 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
     return describeShop(state);
   },
 
-  toolkitCreator: (identifier, forChatId, eventCallback) => {
+  // `eventCallback` is unused on purpose: every tool here goes through an OP,
+  // and the op records anything that belongs on the timeline (`ctx.emit`). A
+  // tool that also dispatched its own event double-recorded it, with a random
+  // id the reducer could not dedupe (2026-09-12).
+  toolkitCreator: (identifier, forChatId, _eventCallback) => {
     const base = identifier.instanceName.replace(/[^a-zA-Z0-9]/g, "_");
     const idArgs = { ...identifier, applicationId: identifier.nodeId, chatIdSource: forChatId };
     const op = async <T,>(name: string, args?: unknown): Promise<T> => {
@@ -432,7 +436,12 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
         }),
         execute: async (args: unknown) => {
           const r = await op<{ orderId: string; totalCents: number }>("checkout", args);
-          eventCallback(catalogueChangedEvent.dataCreator({ ...idArgs, what: `order ${r.orderId} placed` }));
+          // NOT a catalogue change. This used to bump `catalogueVersion`, which
+          // is what every open storefront watches to re-read the shelves — so
+          // at a thousand orders a day every shopper's page would refetch the
+          // catalogue a thousand times for something that did not touch it.
+          // The desk and the customer learn through the channel's own topics
+          // (`new-order`, `order-status`), which is what those are for.
           return `Order ${r.orderId} placed — ${(r.totalCents / 100).toFixed(2)}. The basket is empty again.`;
         },
       },
@@ -466,7 +475,7 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
         }),
         execute: async (args: { orderId: string; status: string }) => {
           const r = await op<{ id: string; status: string; shipTo: { name?: string; street?: string; city?: string } | null }>("set-order-status", args);
-          eventCallback(catalogueChangedEvent.dataCreator({ ...idArgs, what: `order ${r.id} → ${r.status}` }));
+          // Not a catalogue change either — see the note in `checkout` above.
           const to = r.shipTo && typeof r.shipTo === "object" ? [r.shipTo.name, r.shipTo.street, r.shipTo.city].filter(Boolean).join(", ") : "";
           return `Order ${r.id} is now ${r.status}.${to ? ` Ship to: ${to}.` : ""} The customer has been told; nobody else was.`;
         },
@@ -481,8 +490,13 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
           tags: z.array(z.string().min(1).max(24)).max(8).optional().describe('How the storefront groups it: "tea", "gifts", "new"'),
         }),
         execute: async (args: { name: string }) => {
+          // The OP records the catalogue change now, with a change id derived
+          // from the product and the departments it introduced. This tool used
+          // to dispatch its own with a random id, so every product bumped the
+          // version twice and none of them recorded a department — the reason
+          // a shop stocked by its agent had no departments at all while its
+          // catalogue version climbed past thirty (2026-09-12).
           const p = await op<{ tags: string[] }>("add-product", args);
-          eventCallback(catalogueChangedEvent.dataCreator({ ...idArgs, what: `added ${args.name}` }));
           return `Added ${args.name}${p.tags?.length ? ` under ${p.tags.join(", ")}` : ""}.`;
         },
       },
