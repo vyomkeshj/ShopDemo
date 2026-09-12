@@ -44,10 +44,11 @@ describe("announcements", () => {
 
 describe("what an agent is told", () => {
   it("describes the fold and points at the tables for the rest", () => {
-    const text = describeShop({ instanceName: "Corner shop", catalogueVersion: 3, announcements: [] });
+    const text = describeShop({ instanceName: "Corner shop", catalogueVersion: 3, announcements: [], departments: ["tea"] });
     expect(text).toContain("Corner shop");
     expect(text).toContain("version 3");
     expect(text).toMatch(/list_orders/);
+    expect(text).toContain("tea");
   });
 
   it("says the state did not load rather than inventing an empty shop", () => {

@@ -155,6 +155,11 @@ describe("only a catalogue change is a catalogue change", () => {
       { workspaceId: "w", nodeId: "n", instanceName: "Shop", applicationType: "plugin_shop_demo" } as never,
       undefined as never,
       ((e: { eventName: string }) => dispatched.push(e)) as never,
+      // The platform passes a chat-message callback too. Naming it here is
+      // what makes this call type-check in an author's editor — `tsc` on the
+      // whole tree caught it; ts-jest never type-checks, so the box was green
+      // with a call the real signature refuses (2026-09-12).
+      (() => undefined) as never,
     ) as Record<string, { execute: (a: unknown) => Promise<unknown> }>;
     return { tools, dispatched };
   };
