@@ -15,7 +15,7 @@ import { fakeViewer, memoryDb, runOp } from "esoul-sdk/testing";
 import manifest from "./plugin.json";
 import { pluginServer } from "./server";
 import { pluginSchema, shopChannel, toldCustomerEvent, type ShopDemoData } from "./app";
-import { subscriptionsFor } from "../../../packages/esoul-sdk/src/audience";
+import { subscriptionsFor } from "esoul-sdk";
 
 const staff = fakeViewer("member", { userId: "kp_s", role: "staff" });
 const alice = fakeViewer("visitor", { userId: "kp_a", role: "customer" });
