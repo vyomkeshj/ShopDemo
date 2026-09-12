@@ -137,6 +137,21 @@ describe("checkout", () => {
     expect(orders.result.find((o) => o.id === result.orderId)!.shipTo.name).toBe("Alice Nowak");
   });
 
+  it("fills a blank name from the buyer's own account, and says where the receipt goes", async () => {
+    const { db, tea } = await stocked();
+    const ada = fakeViewer("visitor", { userId: "kp_ada", role: "customer", name: "Ada Lovelace", email: "ada@example.test" });
+    await runOp(pluginServer, "add-to-cart", { ...as(db, ada), args: { productId: tea } });
+    const { result } = (await runOp(pluginServer, "checkout", { ...as(db, ada), args: { shipTo: { ...SHIP, name: "" } } })) as {
+      result: { orderId: string; receiptTo: string | null };
+    };
+    expect(result.receiptTo).toBe("ada@example.test");
+    const orders = (await runOp(pluginServer, "list-orders", { ...as(db, ada), args: {} })) as { result: { id: string; shipTo: { name: string } }[] };
+    expect(orders.result.find((o) => o.id === result.orderId)!.shipTo.name).toBe("Ada Lovelace");
+    // And what they typed themselves still wins over the account.
+    const me = (await runOp(pluginServer, "me", { ...as(db, ada), args: {} })) as { result: { name: string | null } };
+    expect(me.result.name).toBe("Ada Lovelace");
+  });
+
   it("an empty basket is not an order", async () => {
     const { db } = await stocked();
     await expect(runOp(pluginServer, "checkout", { ...as(db, alice), args: { shipTo: SHIP } })).rejects.toThrow(/basket is empty/);
