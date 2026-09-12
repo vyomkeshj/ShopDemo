@@ -347,7 +347,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
       if (!name || !Number.isFinite(priceCents)) return;
       const sku = String(form.get("sku") ?? "").trim();
       const description = String(form.get("description") ?? "").trim();
-      await op("add-product", {
+      const added = await op<{ id: string }>("add-product", {
         name,
         priceCents,
         ...(sku ? { sku } : {}),
@@ -357,8 +357,13 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
           .map((t) => t.trim().toLowerCase())
           .filter(Boolean),
       });
+      // The SERVER records this too (`add-product` emits it), with the same
+      // change id derived from the product — so whichever lands first wins and
+      // the other is a no-op. This one is here for the person who pressed Add:
+      // their own screen should not wait for a round trip.
       dispatch?.(
         catalogueChangedEvent.dataCreator({
+          changeId: `product:${added.id}`,
           workspaceId: state.workspaceId,
           nodeId: state.nodeId,
           applicationId: state.nodeId,

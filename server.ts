@@ -13,6 +13,9 @@ import { z } from "zod";
 import { pluginDb, sseStream } from "esoul-sdk/server";
 import type { PluginOpContext, PluginRouteContext, PluginServerModule } from "esoul-sdk/server";
 import type { ShopDemoDb } from "./.esoul/db";
+// The shop's own ids and its catalogue event: the op records the change on the
+// timeline, so an agent stocking the shop fills the departments too.
+import { catalogueChangedEvent } from "./app";
 
 const db = (ctx: PluginOpContext) => pluginDb<ShopDemoDb>(ctx);
 
@@ -97,7 +100,29 @@ async function addProduct(ctx: PluginOpContext) {
       tags: (input.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
     },
   });
+  // THE SHOP RECORDS ITS OWN CHANGE, whoever asked for it. The storefront
+  // offers departments from the fold, and until this was here only the owner's
+  // FORM recorded them — so a shop stocked by its agent had a catalogue and no
+  // departments at all (seen on production, 2026-09-12). The change id is
+  // derived from the product, so the UI's own optimistic dispatch of the same
+  // event is a no-op rather than a second bump.
+  await recordCatalogueChange(ctx, `added ${p.name}`, p.id, p.tags ?? []);
   return { id: p.id, name: p.name, tags: p.tags ?? [] };
+}
+
+/**
+ * Put the catalogue's change on the shop's own timeline. A courtesy, like
+ * telling the desk: a failure must not undo a product that exists.
+ */
+async function recordCatalogueChange(ctx: PluginOpContext, what: string, productId: string, tags: string[]): Promise<void> {
+  try {
+    // `ctx.emit` is the seam: the platform provides it in production and in a
+    // workbench, and `runOp` captures it, so this line is testable rather than
+    // host-only.
+    await ctx.emit(catalogueChangedEvent.eventName, { changeId: `product:${productId}`, what, tags, at: Date.now() });
+  } catch (err) {
+    console.warn(`[shop-demo] product ${productId} added, catalogue change not recorded: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**

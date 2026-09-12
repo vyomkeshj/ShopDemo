@@ -105,3 +105,35 @@ describe("the shelf a stranger walks", () => {
     expect(await shelf(db)).toEqual({ items: [], nextCursor: null });
   });
 });
+
+/**
+ * THE DEPARTMENTS THE STOREFRONT OFFERS.
+ *
+ * They live in the fold, and until the SERVER recorded them only the owner's
+ * form did — so a shop stocked by its agent had a catalogue and no departments
+ * at all (seen on production, 2026-09-12). The change id is derived from the
+ * product, so the UI's own optimistic dispatch of the same event is a no-op.
+ */
+describe("adding a product records the catalogue change", () => {
+  it("names the departments it introduced, with an id derived from the product", async () => {
+    const db = memoryDb(manifest as never);
+    const run = (await runOp(pluginServer, "add-product", {
+      viewer: owner,
+      args: { name: "Earl Grey", priceCents: 450, tags: [" Tea ", "GIFTS"] },
+      db: db.as(owner),
+    })) as { result: { id: string }; emitted: { eventName: string; eventData: Record<string, unknown> }[] };
+    const result = run.result;
+    const change = run.emitted.find((e) => e.eventName.endsWith("catalogue_changed"));
+    expect(change?.eventData).toMatchObject({ changeId: `product:${result.id}`, tags: ["tea", "gifts"] });
+  });
+
+  it("a product that adds no department still records the change", async () => {
+    const db = memoryDb(manifest as never);
+    const run2 = (await runOp(pluginServer, "add-product", {
+      viewer: owner,
+      args: { name: "Plain thing", priceCents: 100 },
+      db: db.as(owner),
+    })) as { emitted: { eventName: string }[] };
+    expect(run2.emitted.some((e) => e.eventName.endsWith("catalogue_changed"))).toBe(true);
+  });
+});
