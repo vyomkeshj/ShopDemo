@@ -52,27 +52,30 @@ describe("ShopDemoUi — four people, four shops", () => {
     // The desk's words are the ones a customer must never see.
     expect(text).not.toContain("The desk");
     expect(text).not.toContain("every order of this shop");
-    expect(text).not.toContain("Add something to sell");
+    expect(text).not.toContain("Taken today");
   });
 
-  it("STAFF get the desk, and not the price list or a basket", () => {
+  it("STAFF get the desk — the queue, the shelves and the till — and no basket", () => {
     viewer = { kind: "member", role: "staff", userId: "u2", canEdit: true, signedIn: true };
     const text = render();
     expect(text).toContain("The desk");
     expect(text).toContain("every order of this shop");
-    expect(text).toContain("What the shop sells");
-    expect(text).not.toContain("Add something to sell");
+    // What the desk opens on: the four numbers, then the work.
+    expect(text).toContain("Waiting");
+    expect(text).toContain("Queue");
+    expect(text).toContain("Shelves");
+    expect(text).toContain("Till");
     expect(text).not.toContain("Basket"); // the people who run a shop do not shop in it here
   });
 
-  it("the OWNER gets the desk AND the price list, with a place for a description and departments", () => {
+  it("the OWNER also gets the book of who may help, and the shop's look", () => {
     viewer = { kind: "owner", role: "owner", userId: "u0", canEdit: true, signedIn: true };
     const text = render();
     expect(text).toContain("The desk");
-    expect(text).toContain("Add something to sell");
-    expect(text).toContain("Stock code");
-    expect(text).toContain("What it is");
-    expect(text).toContain("Departments");
+    expect(text).toContain("People");
+    expect(text).toContain("Look");
+    // The notice board is the owner's, and it says what is currently showing.
+    expect(text).toContain("Post");
   });
 
   it("a SIGNED-OUT visitor gets the shelves and a reason to sign in — and no orders of anyone's", () => {
@@ -89,9 +92,12 @@ describe("ShopDemoUi — four people, four shops", () => {
     wallNeeded = false;
   });
 
-  it("the owner's price list is hidden when the workspace says read-only — a word is not a permission", () => {
+  it("a read-only owner may LOOK at the desk and change nothing — a word is not a permission", () => {
     viewer = { kind: "owner", role: "owner", userId: "u0", canEdit: false, signedIn: true };
-    expect(render()).not.toContain("Add something to sell");
+    const text = render();
+    expect(text).toContain("The desk");
+    // The notice composer is a write, so it is not offered at all.
+    expect(text).not.toContain("Post");
   });
 });
 

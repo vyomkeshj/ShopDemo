@@ -34,6 +34,19 @@ import {
 import { callPluginOp } from "esoul-sdk";
 import { useAppCanEdit, usePluginEventDispatch, usePluginRealtime, useSignInWall, useViewer } from "esoul-sdk/react";
 import { catalogueChangedEvent, PLUGIN_ID, shopChannel, type Cart, type ShopDemoData } from "../app";
+import { ShopDesk, type DeskOrder, type DeskProduct } from "./shop-desk";
+import {
+  accentOf,
+  EmptyBasketArt,
+  Grain,
+  HeroPattern,
+  NoResultsArt,
+  SealArt,
+  ShopMark,
+  SprigArt,
+  TornEdge,
+  WovenGround,
+} from "./shop-art";
 
 /**
  * A SHOP WITH PAGES.
@@ -72,6 +85,10 @@ interface Product {
   sku: string | null;
   tags: string[];
   description: string | null;
+  /** One line for the shelf. Absent on a shop nobody has written yet. */
+  tagline?: string | null;
+  /** A photograph, if this shop has one of this thing. */
+  imageUrl?: string | null;
 }
 interface Order {
   id: string;
@@ -298,6 +315,13 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
   const narrowed = useMemo(() => (dept || query ? (products ?? []) : []), [products, dept, query]);
   const cartCount = useMemo(() => (cart?.lines ?? []).reduce((n, l) => n + l.qty, 0), [cart]);
   const inCart = useCallback((id: string) => (cart?.lines ?? []).find((l) => l.productId === id)?.qty ?? 0, [cart]);
+  /**
+   * HOW THIS SHOP LOOKS, from its own fold. Both are optional and both have a
+   * drawn answer, so a shop nobody has dressed is a different-looking shop
+   * rather than a broken one.
+   */
+  const accent = useMemo(() => accentOf(state?.look?.accent), [state?.look?.accent]);
+  const hero = state?.look?.heroUrl ?? null;
 
   /* ── the things a shopper does ─────────────────────────────────────────── */
 
@@ -382,25 +406,80 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
 
   /* ── pieces ────────────────────────────────────────────────────────────── */
 
-  const ProductCard = ({ p }: { p: Product }) => {
+  /**
+   * THE PICTURE OF A THING — a photograph if the shop has one, and the thing's
+   * own drawn portrait if it does not.
+   *
+   * The two are the SAME SIZE and the same shape, so a shop that has
+   * photographed half its shelves does not look half-broken; and the drawn one
+   * is a woven ground with the product's icon on it rather than a grey box,
+   * because a grey box is how a shop looks closed. The aspect ratio is fixed
+   * either way, so nothing jumps when a photograph arrives late.
+   */
+  const Picture = ({ p, className = "", iconClass = "h-9 w-9", sizes }: { p: Product; className?: string; iconClass?: string; sizes?: string }) => {
     const Icon = iconFor(p.name, p.sku);
-    const have = inCart(p.id);
+    const tone = accentOf(state?.look?.accent);
+    if (p.imageUrl) {
+      return (
+        <span className={`relative block overflow-hidden bg-stone-100 dark:bg-white/5 ${className}`}>
+          <img
+            src={p.imageUrl}
+            alt={p.name}
+            loading="lazy"
+            decoding="async"
+            sizes={sizes}
+            className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.04]"
+          />
+          <Grain opacity={0.045} />
+        </span>
+      );
+    }
     return (
-      <li className={`${card} group flex flex-col overflow-hidden`}>
-        <button type="button" onClick={() => setPage({ at: "product", id: p.id })} className="flex flex-col items-start gap-2 p-3 text-left">
-          <span className="grid aspect-[4/3] w-full place-items-center rounded-lg bg-gradient-to-br from-stone-100 to-stone-200 text-stone-500 transition group-hover:from-stone-200 group-hover:to-stone-300 dark:from-white/10 dark:to-white/5 dark:text-stone-300">
-            <Icon className="h-10 w-10" aria-hidden />
-          </span>
-          <span className="min-w-0 w-full">
-            <span className="block truncate font-medium leading-tight">{p.name}</span>
-            <span className="mt-0.5 block text-[15px] font-semibold tabular-nums">{money(p.priceCents)}</span>
-            {p.description ? <span className="mt-1 block max-h-8 overflow-hidden text-[11px] leading-4 text-stone-500 dark:text-stone-400">{p.description}</span> : null}
+      <span className={`relative grid place-items-center bg-gradient-to-br from-stone-100 via-stone-50 to-stone-200/70 dark:from-white/[0.07] dark:via-transparent dark:to-white/[0.04] ${className}`}>
+        <WovenGround className="absolute inset-0 h-full w-full text-stone-400/60 dark:text-white/25" />
+        <Icon className={`relative ${iconClass} ${tone.soft}`} aria-hidden />
+      </span>
+    );
+  };
+
+  const ProductCard = ({ p }: { p: Product }) => {
+    const have = inCart(p.id);
+    const tone = accentOf(state?.look?.accent);
+    return (
+      <li className={`group relative flex flex-col overflow-hidden rounded-2xl bg-white/80 ring-1 ${tone.ring} transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_12px_30px_-18px_rgba(28,25,23,0.5)] dark:bg-white/[0.04]`}>
+        <button
+          type="button"
+          onClick={() => setPage({ at: "product", id: p.id })}
+          className="flex flex-col items-stretch text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/40 dark:focus-visible:ring-white/40"
+        >
+          <Picture p={p} className="aspect-square w-full" iconClass="h-12 w-12" sizes="(max-width: 640px) 50vw, 25vw" />
+          <span className="flex min-w-0 flex-col gap-0.5 px-3 pb-2 pt-2.5">
+            <span className="truncate text-[13.5px] font-medium leading-tight">{p.name}</span>
+            {p.tagline ? (
+              <span className="line-clamp-2 text-[11px] leading-4 text-stone-500 dark:text-stone-400">{p.tagline}</span>
+            ) : p.description ? (
+              <span className="line-clamp-2 text-[11px] leading-4 text-stone-500 dark:text-stone-400">{p.description}</span>
+            ) : null}
+            <span className="mt-0.5 text-[15px] font-semibold tabular-nums">{money(p.priceCents)}</span>
           </span>
         </button>
         {shops ? (
-          <div className="px-3 pb-3">
-            <button type="button" disabled={busy === p.id} onClick={() => addToCart(p)} className={`${solid} inline-flex w-full items-center justify-center gap-1.5 text-[12px]`}>
-              {busy === p.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <ShoppingCart className="h-3.5 w-3.5" aria-hidden />}
+          <div className="mt-auto px-3 pb-3">
+            <button
+              type="button"
+              disabled={busy === p.id}
+              onClick={() => addToCart(p)}
+              className={`inline-flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-1.5 text-[12px] font-medium transition disabled:opacity-50 ${
+                have ? `border border-current ${tone.ink} bg-transparent` : tone.pill
+              }`}
+            >
+              {busy === p.id ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : have ? (
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+              ) : (
+                <ShoppingCart className="h-3.5 w-3.5" aria-hidden />
+              )}
               {have ? `In basket · ${have}` : "Add to basket"}
             </button>
           </div>
@@ -424,11 +503,11 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
   );
 
   return (
-    <div className="shop-root flex h-full w-full flex-col overflow-auto bg-stone-50/60 text-[13px] text-stone-800 dark:bg-transparent dark:text-stone-100">
+    <div className="shop-root flex h-full w-full flex-col overflow-auto bg-stone-50 text-[13px] text-stone-800 dark:bg-stone-900 dark:text-stone-100">
       <header className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-stone-300/60 bg-stone-50/90 px-4 py-3 backdrop-blur dark:border-white/10 dark:bg-stone-900/70 sm:px-6">
         <button type="button" onClick={() => setPage({ at: "home" })} className="flex items-center gap-2.5 text-left">
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-stone-900 text-white dark:bg-white dark:text-stone-900">
-            <Store className="h-4 w-4" aria-hidden />
+          <span className={`grid h-9 w-9 place-items-center rounded-xl ${accent.pill}`}>
+            <ShopMark className="h-[18px] w-[18px]" />
           </span>
           <span>
             <span className="block text-[15px] font-semibold leading-tight tracking-tight">{state?.instanceName ?? "Shop"}</span>
@@ -481,15 +560,84 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
         {/* the front */}
         {shops && page.at === "home" ? (
           <>
-            <section className={`${card} flex flex-wrap items-center justify-between gap-4 bg-gradient-to-br from-stone-100 to-stone-50 p-6 dark:from-white/10 dark:to-transparent`}>
-              <div className="max-w-md">
-                <h2 className="text-xl font-semibold tracking-tight">Everything on the shelves today</h2>
-                <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
-                  Open a thing to read about it, put it in the basket, change your mind, then order. You can ask the assistant to do any of it for you.
-                </p>
+            {/* THE FRONT OF THE SHOP.
+                A photograph when the owner has set one, the shop's own drawn
+                morning when they have not — the same shape either way, with
+                the words over a scrim so they are readable on any picture that
+                arrives. The torn bottom edge is what stops it reading as a
+                banner advert. */}
+            <section className="relative -mx-4 overflow-hidden sm:-mx-6">
+              <div className={`relative isolate flex min-h-[13.5rem] flex-col justify-end sm:min-h-[17rem] ${accent.ink}`}>
+                {hero ? (
+                  <>
+                    <img src={hero} alt="" aria-hidden className="absolute inset-0 h-full w-full object-cover" />
+                    {/* TWO SCRIMS, ON TWO AXES. One up from the bottom for the
+                        words, one in from the left for the column they sit in —
+                        a photograph is bright wherever it likes, and on a phone
+                        the crop puts its brightest part right under the
+                        headline. One gradient was not enough; this was measured
+                        on the phone screenshot, not guessed. */}
+                    <div className="absolute inset-0 bg-gradient-to-t from-stone-950/88 via-stone-950/45 to-stone-950/10" />
+                    <div className="absolute inset-0 bg-gradient-to-r from-stone-950/70 via-stone-950/20 to-transparent" />
+                    <Grain opacity={0.06} />
+                  </>
+                ) : (
+                  <>
+                    <HeroPattern className={`absolute inset-0 h-full w-full ${accent.soft}`} />
+                    <div className={`absolute inset-0 bg-gradient-to-br ${accent.wash} opacity-70`} />
+                  </>
+                )}
+                <div className={`relative px-4 pb-7 pt-10 sm:px-6 ${hero ? "text-white" : ""}`}>
+                  <p className={`flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.18em] ${hero ? "text-white/75" : "opacity-70"}`}>
+                    <ShopMark className="h-3.5 w-3.5" /> open today
+                  </p>
+                  <h2 className="mt-2 max-w-xl text-[1.6rem] font-semibold leading-[1.12] tracking-tight sm:text-[2.1rem]">
+                    {state?.look?.tagline || "Everything on the shelves today"}
+                  </h2>
+                  <p className={`mt-2 max-w-md text-[12.5px] leading-5 ${hero ? "text-white/80" : "opacity-75"}`}>
+                    Open a thing to read about it, put it in the basket, change your mind, then order — or ask the assistant to do
+                    any of it for you.
+                  </p>
+                  {departments.length ? (
+                    <div className="mt-4 flex flex-wrap gap-1.5">
+                      {departments.slice(0, 6).map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => {
+                            setDept(t);
+                            setPage({ at: "home" });
+                          }}
+                          className={`rounded-full px-3 py-1 text-[11.5px] font-medium capitalize backdrop-blur transition ${
+                            hero ? "bg-white/15 text-white ring-1 ring-white/25 hover:bg-white/25" : "bg-white/70 ring-1 ring-stone-900/10 hover:bg-white dark:bg-white/10 dark:ring-white/15"
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <TornEdge className="absolute -bottom-px left-0 h-[18px] w-full text-stone-50 dark:text-stone-900" />
               </div>
-              <Store className="h-16 w-16 shrink-0 text-stone-300 dark:text-white/15" aria-hidden />
             </section>
+
+            {/* What a shop says about itself in three short promises. */}
+            <ul className="-mt-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {[
+                { Icon: PackageCheck, title: "Packed the morning it goes out", line: "Nothing sits in a warehouse waiting for you." },
+                { Icon: Truck, title: "Ostrava and the villages round it", line: "Two days, usually one. We tell you when it moves." },
+                { Icon: Sparkles, title: "Ask, and it is done", line: "The assistant can fill your basket and order it." },
+              ].map(({ Icon, title, line }) => (
+                <li key={title} className={`flex items-start gap-2.5 rounded-xl bg-white/60 px-3 py-2.5 ring-1 ${accent.ring} dark:bg-white/[0.03]`}>
+                  <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${accent.soft}`} aria-hidden />
+                  <span>
+                    <span className="block text-[12px] font-medium leading-tight">{title}</span>
+                    <span className="block text-[11px] leading-4 text-stone-500 dark:text-stone-400">{line}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
 
             {/* FINDING THINGS. Both of these are questions for the server: with
                 a big catalogue, a department the browser filters for is a
@@ -552,9 +700,26 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
             {products === null ? (
               <p className="text-stone-500">Setting out the shelves…</p>
             ) : products.length === 0 ? (
-              <div className={`${card} p-8 text-center text-stone-500`}>
-                <Store className="mx-auto mb-2 h-6 w-6 opacity-40" aria-hidden />
-                <p>The shelves are empty.</p>
+              <div className={`flex flex-col items-center gap-2 rounded-2xl bg-white/60 px-6 py-10 text-center ring-1 ${accent.ring} dark:bg-white/[0.03]`}>
+                <NoResultsArt className={`h-20 w-20 ${accent.soft}`} />
+                <p className="text-[13px] font-medium">{dept || query ? "Nothing here yet" : "The shelves are empty"}</p>
+                <p className="max-w-xs text-[11.5px] leading-4 text-stone-500 dark:text-stone-400">
+                  {query ? `Nothing matching “${query}”.` : dept ? `Nothing in ${dept} today.` : "The owner has not put anything out."}
+                  {dept || query ? " Try everything, or another department." : ""}
+                </p>
+                {dept || query ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDept(null);
+                      setTerm("");
+                      setQuery("");
+                    }}
+                    className={`mt-1 rounded-xl px-3 py-1.5 text-[12px] font-medium ${accent.pill}`}
+                  >
+                    Show everything
+                  </button>
+                ) : null}
               </div>
             ) : (
               <>
@@ -619,14 +784,22 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
             {detail === null ? (
               <p className="text-stone-500">Fetching it…</p>
             ) : (
-              <div className="grid gap-5 sm:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
-                <div className={`${card} grid aspect-square place-items-center bg-gradient-to-br from-stone-100 to-stone-200 text-stone-400 dark:from-white/10 dark:to-white/5 dark:text-stone-300`}>
-                  {React.createElement(iconFor(detail.name, detail.sku), { className: "h-24 w-24", "aria-hidden": true })}
+              <div className="grid gap-6 sm:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
+                <div className="group relative">
+                  <Picture
+                    p={detail}
+                    className={`aspect-square w-full rounded-3xl ring-1 ${accent.ring} shadow-[0_24px_50px_-32px_rgba(28,25,23,0.6)]`}
+                    iconClass="h-24 w-24"
+                    sizes="(max-width: 640px) 92vw, 22rem"
+                  />
+                  {/* a corner flourish, so the picture is framed rather than pasted */}
+                  <SprigArt className={`absolute -bottom-2 left-1/2 h-4 w-12 -translate-x-1/2 ${accent.soft}`} />
                 </div>
                 <div className="flex flex-col gap-3">
                   <div>
-                    <h2 className="text-xl font-semibold tracking-tight">{detail.name}</h2>
-                    <p className="mt-1 text-2xl font-semibold tabular-nums">{money(detail.priceCents)}</p>
+                    <h2 className="text-[1.45rem] font-semibold leading-tight tracking-tight">{detail.name}</h2>
+                    {detail.tagline ? <p className="mt-1 max-w-prose text-[13px] italic leading-5 text-stone-500 dark:text-stone-400">{detail.tagline}</p> : null}
+                    <p className="mt-2 text-2xl font-semibold tabular-nums">{money(detail.priceCents)}</p>
                     {detail.sku ? <p className="mt-0.5 font-mono text-[11px] text-stone-400">{detail.sku}</p> : null}
                   </div>
                   {detail.tags?.length ? (
@@ -643,9 +816,17 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
                       ))}
                     </div>
                   ) : null}
-                  <p className="max-w-prose whitespace-pre-wrap text-[13px] leading-relaxed text-stone-600 dark:text-stone-300">
-                    {detail.description ?? "The shop has not written about this one yet."}
-                  </p>
+                  {detail.description ? (
+                    <div className="max-w-prose space-y-2.5 text-[13.5px] leading-[1.65] text-stone-600 dark:text-stone-300">
+                      {detail.description.split(/\n{2,}/).map((para, i) => (
+                        <p key={i} className={i === 0 ? "first-letter:float-left first-letter:mr-1 first-letter:text-[2.1rem] first-letter:font-semibold first-letter:leading-[0.85] first-letter:text-stone-800 dark:first-letter:text-stone-100" : ""}>
+                          {para}
+                        </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="max-w-prose text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">The shop has not written about this one yet.</p>
+                  )}
                   {shops ? (
                     <div className="mt-1 flex flex-wrap items-center gap-2">
                       <button type="button" disabled={busy === detail.id} onClick={() => addToCart(detail)} className={`${solid} inline-flex items-center gap-1.5`}>
@@ -677,9 +858,15 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
             {!viewer.signedIn ? (
               <p className="text-stone-500">Sign in and your basket follows you.</p>
             ) : !cart || cart.lines.length === 0 ? (
-              <div className={`${card} p-8 text-center text-stone-500`}>
-                <ShoppingCart className="mx-auto mb-2 h-6 w-6 opacity-40" aria-hidden />
-                <p>Nothing in it yet.</p>
+              <div className={`flex flex-col items-center gap-2 rounded-2xl bg-white/60 px-6 py-10 text-center ring-1 ${accent.ring} dark:bg-white/[0.03]`}>
+                <EmptyBasketArt className={`h-24 w-24 ${accent.soft}`} />
+                <p className="text-[13px] font-medium">Nothing in it yet</p>
+                <p className="max-w-xs text-[11.5px] leading-4 text-stone-500 dark:text-stone-400">
+                  Put something in from the shelves — or ask the assistant to, and watch this page fill itself.
+                </p>
+                <button type="button" onClick={() => setPage({ at: "home" })} className={`mt-1 rounded-xl px-3 py-1.5 text-[12px] font-medium ${accent.pill}`}>
+                  Back to the shelves
+                </button>
               </div>
             ) : (
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
@@ -747,16 +934,21 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
               <ClipboardList className="h-4 w-4 text-stone-400" aria-hidden /> Your orders
             </h2>
             {placed ? (
-              <p className="rounded-xl border border-emerald-300/60 bg-emerald-50/70 px-3 py-2 text-[12px] text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-100">
-                Thank you — order <span className="font-mono">{placed.slice(0, 8)}</span> is with the shop. This page follows it.
-              </p>
+              <div className="flex items-center gap-3 rounded-2xl border border-emerald-300/60 bg-emerald-50/70 px-4 py-3 dark:border-emerald-400/30 dark:bg-emerald-400/10">
+                <SealArt className="h-11 w-11 shrink-0 text-emerald-700 dark:text-emerald-300" />
+                <p className="text-[12.5px] leading-5 text-emerald-900 dark:text-emerald-100">
+                  <span className="font-medium">Thank you.</span> Order <span className="font-mono">{placed.slice(0, 8)}</span> is with the shop —
+                  this page follows it, and we write when it moves.
+                </p>
+              </div>
             ) : null}
             {orders === null ? (
               <p className="text-stone-500">Looking…</p>
             ) : orders.length === 0 ? (
-              <div className={`${card} p-8 text-center text-stone-500`}>
-                <CheckCircle2 className="mx-auto mb-2 h-6 w-6 opacity-40" aria-hidden />
-                <p>Nothing ordered yet.</p>
+              <div className={`flex flex-col items-center gap-2 rounded-2xl bg-white/60 px-6 py-10 text-center ring-1 ${accent.ring} dark:bg-white/[0.03]`}>
+                <SealArt className={`h-12 w-12 ${accent.soft}`} />
+                <p className="text-[13px] font-medium">Nothing ordered yet</p>
+                <p className="max-w-xs text-[11.5px] leading-4 text-stone-500 dark:text-stone-400">When you order, it appears here and stays — on every device you sign in on.</p>
               </div>
             ) : (
               <ul className="flex flex-col gap-2">
@@ -777,118 +969,46 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
         ) : null}
 
         {/* the desk */}
+        {/* ── THE DESK ──────────────────────────────────────────────────────
+             A back office is not a storefront with the prices showing: it is
+             a queue, a table, an editor, a till and a book of who may help.
+             It lives in its own file because it is its own product. */}
         {isDesk ? (
-          <>
-            <section>
-              <h2 className="mb-2 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-stone-500 dark:text-stone-400">
-                <ShoppingBag className="h-3.5 w-3.5" aria-hidden /> What the shop sells
-              </h2>
-              {products === null ? <p className="text-stone-500">Reading the shelves…</p> : <Grid items={products} />}
-            </section>
-
-            {isOwner && canEdit ? (
-              <section>
-                <h2 className="mb-2 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-stone-500 dark:text-stone-400">
-                  <Plus className="h-3.5 w-3.5" aria-hidden /> Add something to sell
-                </h2>
-                <form
-                  className={`${card} grid gap-2 p-3 sm:grid-cols-2`}
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const form = new FormData(e.currentTarget);
-                    e.currentTarget.reset();
-                    void addProduct(form);
-                  }}
-                >
-                  <label className="flex flex-col gap-1">
-                    <span className="text-[11px] text-stone-500 dark:text-stone-400">Name</span>
-                    <input name="name" placeholder="Earl Grey" required className={field} />
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[11px] text-stone-500 dark:text-stone-400">Price</span>
-                      <input name="price" type="number" step="0.01" min="0" placeholder="4.50" required className={`${field} tabular-nums`} />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[11px] text-stone-500 dark:text-stone-400">Stock code</span>
-                      <input name="sku" placeholder="TEA-01" className={`${field} font-mono text-[12px]`} />
-                    </label>
-                  </div>
-                  <label className="flex flex-col gap-1 sm:col-span-2">
-                    <span className="text-[11px] text-stone-500 dark:text-stone-400">What it is</span>
-                    <textarea name="description" rows={2} placeholder="Bergamot, loose leaf, from a garden in Uva." className={field} />
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-[11px] text-stone-500 dark:text-stone-400">Departments (comma separated)</span>
-                    <input name="tags" placeholder="tea, gifts" className={field} />
-                  </label>
-                  <div className="flex items-end">
-                    <button type="submit" disabled={busy === "add"} className={`${solid} inline-flex items-center gap-1.5`}>
-                      {busy === "add" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />} Add
-                    </button>
-                  </div>
-                </form>
-              </section>
-            ) : null}
-
-            <section className="flex flex-col gap-2">
-              <h2 className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-stone-500 dark:text-stone-400">
-                <ClipboardList className="h-3.5 w-3.5" aria-hidden /> The desk
-                {(orders ?? []).some((o) => o.status !== "fulfilled" && o.status !== "refunded")
-                  ? ` — ${(orders ?? []).filter((o) => o.status !== "fulfilled" && o.status !== "refunded").length} to do`
-                  : ""}
-              </h2>
-              {orders === null ? (
-                <p className="text-stone-500">Looking…</p>
-              ) : orders.length === 0 ? (
-                <div className={`${card} p-6 text-center text-stone-500`}>
-                  <CheckCircle2 className="mx-auto mb-2 h-6 w-6 opacity-40" aria-hidden />
-                  <p>Nothing waiting. The desk is clear.</p>
-                </div>
-              ) : (
-                <ul className="flex flex-col gap-2">
-                  {orders.map((o) => (
-                    <li key={o.id} className={`${card} flex flex-wrap items-start justify-between gap-3 p-3`}>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <StatusPill status={o.status} />
-                          <span className="font-mono text-[10px] text-stone-400">{o.id.slice(0, 8)}</span>
-                          {o.shipTo?.name ? <span className="text-[12px] text-stone-600 dark:text-stone-300">for {o.shipTo.name}</span> : null}
-                          <span className="ml-auto text-[14px] font-semibold tabular-nums">{money(o.totalCents)}</span>
-                        </div>
-                        <p className="mt-1 truncate text-[12px] text-stone-600 dark:text-stone-300">{o.lines.map((l) => `${l.qty} × ${l.name}`).join(", ")}</p>
-                        {o.shipTo?.street ? (
-                          <p className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400">
-                            {o.shipTo.street}, {o.shipTo.city}
-                          </p>
-                        ) : null}
-                        {o.note ? <p className="mt-0.5 text-[11px] italic text-stone-500 dark:text-stone-400">{o.note}</p> : null}
-                      </div>
-                      {o.status !== "refunded" && o.status !== "fulfilled" ? (
-                        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                          {FLOW.slice(FLOW.indexOf(o.status as (typeof FLOW)[number]) + 1).map((next) => (
-                            <button key={next} type="button" disabled={busy === o.id} onClick={() => move(o, next)} className={ghost}>
-                              {busy === o.id ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : STATUS[next]!.label}
-                            </button>
-                          ))}
-                          <button type="button" disabled={busy === o.id} onClick={() => move(o, "refunded")} className={`${ghost} text-rose-700 dark:text-rose-300`}>
-                            Refund
-                          </button>
-                        </div>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {state?.deliveries?.length ? (
-                <p className="text-[11px] text-stone-400 dark:text-stone-500">
-                  {state.deliveries.length} customer {state.deliveries.length === 1 ? "message" : "messages"} sent — each one told exactly once.
-                </p>
-              ) : null}
-            </section>
-          </>
+          <ShopDesk
+            instanceName={state?.instanceName ?? "Shop"}
+            look={state?.look}
+            announcements={state?.announcements ?? []}
+            departments={departments}
+            isOwner={isOwner}
+            canEdit={canEdit}
+            products={products as DeskProduct[] | null}
+            nextCursor={nextCursor}
+            onLoadMore={loadMore}
+            loadingMore={more}
+            orders={orders as DeskOrder[] | null}
+            op={op}
+            refreshProducts={loadProducts}
+            refreshOrders={loadOrders}
+            busy={busy}
+            run={guard}
+          />
         ) : null}
       </div>
+
+      {/* The bottom of the shop. A sprig, a name, and who is actually serving
+          you — the last one is not decoration: this storefront is the same app
+          an agent drives, and a person should be told that plainly. */}
+      <footer className="mt-auto flex flex-col items-center gap-1.5 px-4 pb-6 pt-8 text-center sm:px-6">
+        <SprigArt className={`h-4 w-12 ${accent.soft}`} />
+        <p className="flex items-center gap-1.5 text-[11.5px] font-medium tracking-tight">
+          <ShopMark className={`h-3.5 w-3.5 ${accent.soft}`} /> {state?.instanceName ?? "Shop"}
+        </p>
+        <p className="max-w-sm text-[10.5px] leading-4 text-stone-400 dark:text-stone-500">
+          The shelves, your basket and your orders are this shop&rsquo;s own — you are seeing them as{" "}
+          <span className="font-medium text-stone-500 dark:text-stone-400">{viewer.role}</span>. An assistant can do anything on this
+          page that you can.
+        </p>
+      </footer>
     </div>
   );
 }

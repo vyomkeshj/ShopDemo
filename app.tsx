@@ -78,6 +78,23 @@ export interface ShopDemoData extends ApplicationIdentifier, BindingHolder {
    * retry can read. It is on the timeline, so it can also be looked at.
    */
   deliveries: ShopDelivery[];
+  /**
+   * HOW IT LOOKS. Absent on a shop nobody has dressed yet — and the storefront
+   * has to be good-looking then too, which is why every field here is
+   * optional and the UI draws its own picture when there is none.
+   */
+  look?: ShopLook;
+}
+
+/** The shop's own five palettes, by name. Never raw CSS from an event. */
+export const ACCENTS = ["stone", "amber", "rose", "emerald", "indigo"] as const;
+
+export interface ShopLook {
+  /** A photograph across the top, as an https link, or null for the shop's own pattern. */
+  heroUrl?: string | null;
+  /** The line under the shop's name. */
+  tagline?: string | null;
+  accent?: (typeof ACCENTS)[number];
 }
 
 const MAX_ANNOUNCEMENTS = 20;
@@ -129,6 +146,43 @@ export const catalogueChangedEvent: EventDefinition<ShopDemoData> = {
       departments,
       _lastChangeId: d.changeId,
     } as ShopDemoData;
+  },
+};
+
+/**
+ * HOW THE SHOP LOOKS: the picture across the top, the line under its name, the
+ * accent. One small fact about the WHOLE shop, so it lives on the timeline
+ * rather than in a table — every open storefront hears it the moment it
+ * changes, and a look somebody regrets can be scrubbed like anything else.
+ *
+ * A field that is absent is LEFT ALONE; `null` clears it. Those are different
+ * on purpose: "I am only changing the tagline" must not blank the photograph.
+ */
+export const shopLookSetEvent: EventDefinition<ShopDemoData> = {
+  eventName: "plugin_shop_demo_look_set",
+  type: EventTypes.Client,
+  triggerMeta: {
+    displayName: "Shop look changed",
+    description: "Fires when the owner sets the shop's hero picture, tagline or accent. eventData: {heroUrl, tagline, accent}.",
+    sampleVariables: ["event.tagline", "event.accent"],
+  },
+  dataCreator: (args) =>
+    envelope("plugin_shop_demo_look_set", args, {
+      ...(args.heroUrl !== undefined ? { heroUrl: args.heroUrl } : {}),
+      ...(args.tagline !== undefined ? { tagline: args.tagline } : {}),
+      ...(args.accent !== undefined ? { accent: args.accent } : {}),
+      at: args.at ?? Date.now(),
+    }),
+  processor: (state, event) => {
+    const d = event.eventData || {};
+    const look = { ...(state.look ?? {}) };
+    // An https link or nothing. A fold is read by every visitor's browser, so
+    // what a processor keeps is what a page will render: the check belongs
+    // here as well as in the op, because an event can arrive from anywhere.
+    if (d.heroUrl !== undefined) look.heroUrl = typeof d.heroUrl === "string" && /^https:\/\/[^\s]+$/i.test(d.heroUrl) ? d.heroUrl : null;
+    if (d.tagline !== undefined) look.tagline = typeof d.tagline === "string" ? d.tagline.slice(0, 160) : null;
+    if (d.accent !== undefined && (ACCENTS as readonly string[]).includes(String(d.accent))) look.accent = String(d.accent) as ShopLook["accent"];
+    return { ...state, look } as ShopDemoData;
   },
 };
 
@@ -215,11 +269,16 @@ export function describeCart(cart: Cart, shopName: string): string {
   return `${lines.join("\n")}\nTotal ${(cart.totalCents / 100).toFixed(2)}.`;
 }
 
-export function describeShop(s: Pick<ShopDemoData, "instanceName" | "catalogueVersion" | "announcements" | "departments">): string {
+export function describeShop(s: Pick<ShopDemoData, "instanceName" | "catalogueVersion" | "announcements" | "departments" | "look">): string {
   const n = s.announcements?.length ?? 0;
   const depts = s.departments ?? [];
+  const look = s.look ?? {};
+  const dressed = [look.heroUrl ? "a hero picture" : null, look.tagline ? `the line "${look.tagline}"` : null, look.accent ? `${look.accent} accent` : null]
+    .filter(Boolean)
+    .join(", ");
   return (
     `Shop "${s.instanceName}": catalogue version ${s.catalogueVersion ?? 0}, ${n} announcement${n === 1 ? "" : "s"}. ` +
+    (dressed ? `Its look: ${dressed}. ` : "Not dressed yet — set_shop_look takes a hero picture, a tagline and an accent. ") +
     (depts.length ? `Departments: ${depts.join(", ")}. ` : "No departments yet. ") +
     `Products and orders live in the app's own tables — use browse_shop (narrow it by department or search term; it pages) ` +
     `and list_orders; a customer's list is theirs alone.`
@@ -331,7 +390,7 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
   channel: shopChannel,
   reactNode: ShopDemoUi,
   reconstructStateFromEventLog: true,
-  events: [catalogueChangedEvent, announcedEvent, toldCustomerEvent, bindingSetEvent as never],
+  events: [catalogueChangedEvent, shopLookSetEvent, announcedEvent, toldCustomerEvent, bindingSetEvent as never],
   getPorts: (): ApplicationPort[] => [],
   stateCreator: (identifier) => ({ ...identifier, catalogueVersion: 0, departments: [], announcements: [], deliveries: [] }),
 
@@ -522,11 +581,18 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
       },
       [`add_product_${base}`]: {
         description: `Add a product to "${identifier.instanceName}" (owner only).`,
+        // EVERY FIELD THE OP ACCEPTS IS DECLARED HERE, and that is not
+        // tidiness: zod STRIPS what a schema does not name, so a tool whose
+        // parameters lag its op drops arguments silently and answers "Added
+        // Earl Grey" while the picture you passed went nowhere. Found by
+        // photographing the shelf and seeing the drawn fallback (2026-09-12).
         parameters: z.object({
           name: z.string().min(1).max(80),
           priceCents: z.number().int().min(0),
           sku: z.string().max(40).optional(),
           description: z.string().max(2000).optional().describe("What it is, in the shop's own words — the product page is mostly this"),
+          tagline: z.string().max(140).optional().describe("One line the shelf shows under the name"),
+          imageUrl: z.string().max(500).optional().describe("A photograph of it — an https link"),
           tags: z.array(z.string().min(1).max(24)).max(8).optional().describe('How the storefront groups it: "tea", "gifts", "new"'),
         }),
         execute: async (args: { name: string }) => {
@@ -538,6 +604,74 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
           // catalogue version climbed past thirty (2026-09-12).
           const p = await op<{ tags: string[] }>("add-product", args);
           return `Added ${args.name}${p.tags?.length ? ` under ${p.tags.join(", ")}` : ""}.`;
+        },
+      },
+      /**
+       * WRITING THE SHOP, which is most of running one. A description written
+       * badly used to be permanent and a photograph taken later had nowhere to
+       * go: the app could only ADD. Only the fields named are touched.
+       */
+      [`update_product_${base}`]: {
+        description:
+          `Change a product of "${identifier.instanceName}" (owner only): its words, its price, its picture, its departments, ` +
+          `or take it off the shelves with active:false (the row and its sales are kept). Only what you name is changed.`,
+        parameters: z.object({
+          productId: z.string().min(1),
+          name: z.string().min(1).max(80).optional(),
+          priceCents: z.number().int().min(0).optional(),
+          description: z.string().max(2000).optional().describe("The product page is mostly this — write it like a shop would"),
+          tagline: z.string().max(140).optional().describe("One line the shelf shows under the name"),
+          tags: z.array(z.string().min(1).max(24)).max(8).optional(),
+          imageUrl: z.string().max(500).optional().describe("A photograph of it — an https link"),
+          active: z.boolean().optional(),
+        }),
+        execute: async (args: { productId: string }) => {
+          const p = await op<{ name: string; active: boolean; imageUrl: string | null }>("update-product", args);
+          return `${p.name}: updated${p.active ? "" : " and taken off the shelves"}${p.imageUrl ? ", picture set" : ""}.`;
+        },
+      },
+      /**
+       * WHO ELSE RUNS THE SHOP. The desk has a screen for this, so the tools
+       * must have it too — "an assistant can do anything on this page that you
+       * can" is a claim the toolkit either keeps or breaks.
+       */
+      [`give_access_${base}`]: {
+        description:
+          `Give an esoul account a role in "${identifier.instanceName}" by their email (owner only): ` +
+          `customer, staff or owner. An empty role takes the access back. They must have signed into esoul at least once.`,
+        parameters: z.object({
+          email: z.string().min(3).max(200),
+          role: z.string().max(40).describe('One of the shop\'s own words — "staff", "customer", "owner" — or "" to take it back'),
+        }),
+        execute: async (args: { email: string; role: string }) => {
+          const r = await op<{ email: string; role: string; removed: boolean }>("set-person-role", args);
+          return r.removed ? `${r.email} no longer has access.` : `${r.email} is now ${r.role} of "${identifier.instanceName}".`;
+        },
+      },
+      [`list_access_${base}`]: {
+        description: `Who has been given a role in "${identifier.instanceName}", and which roles it has to give (owner only).`,
+        parameters: z.object({}),
+        readOnly: true,
+        execute: async () => {
+          const r = await op<{ people: { email: string | null; role: string }[]; roles: string[] }>("list-people", {});
+          if (!r.people.length) return `Nobody else has access. The roles this shop can give: ${r.roles.join(", ") || "none"}.`;
+          return r.people.map((p) => `${p.email ?? "an account"} — ${p.role}`).join("\n");
+        },
+      },
+      /** The shop's own face: a picture across the top, a line, an accent. */
+      [`set_shop_look_${base}`]: {
+        description:
+          `Set how "${identifier.instanceName}" LOOKS (owner only): heroUrl (an https picture across the top, or null for the ` +
+          `shop's own pattern), tagline (the line under its name), accent (stone, amber, rose, emerald, indigo).`,
+        parameters: z.object({
+          heroUrl: z.string().max(500).nullable().optional(),
+          tagline: z.string().max(160).nullable().optional(),
+          accent: z.enum(["stone", "amber", "rose", "emerald", "indigo"]).optional(),
+        }),
+        execute: async (args: unknown) => {
+          const r = await op<{ heroUrl: string | null; tagline: string | null; accent: string | null }>("set-look", args);
+          const said = [r.heroUrl ? "picture" : null, r.tagline ? "tagline" : null, r.accent ? `accent ${r.accent}` : null].filter(Boolean);
+          return `The shop's look: ${said.length ? said.join(", ") : "cleared"}.`;
         },
       },
     };

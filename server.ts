@@ -15,7 +15,7 @@ import type { PluginOpContext, PluginRouteContext, PluginServerModule } from "es
 import type { ShopDemoDb } from "./.esoul/db";
 // The shop's own ids and its catalogue event: the op records the change on the
 // timeline, so an agent stocking the shop fills the departments too.
-import { catalogueChangedEvent } from "./app";
+import { announcedEvent, catalogueChangedEvent, shopLookSetEvent } from "./app";
 
 const db = (ctx: PluginOpContext) => pluginDb<ShopDemoDb>(ctx);
 
@@ -31,8 +31,46 @@ const ProductInput = z.object({
   sku: z.string().min(1).max(40).optional(),
   /** What it IS, in the shop's own words. The detail page is mostly this. */
   description: z.string().max(2000).optional(),
+  /** One line for the shelf, under the name. */
+  tagline: z.string().max(140).optional(),
+  /** A photograph of it, as an https link. */
+  imageUrl: z.string().max(500).optional(),
   /** How the storefront groups things: "tea", "gifts", "new". Lower-case, few. */
   tags: z.array(z.string().min(1).max(24)).max(8).optional(),
+});
+
+/**
+ * A PICTURE IS A URL WE WILL PUT IN AN `img src`, so it is checked here rather
+ * than trusted: https only, and short enough to be a link rather than an
+ * embedded payload. A `data:` URL would work in a browser and would also let
+ * anyone with the owner's tool put a megabyte in a row that every shopper
+ * downloads; `javascript:` is inert in an `img` but belongs nowhere near one.
+ */
+const ImageUrl = z
+  .string()
+  .max(500)
+  .refine((u) => /^https:\/\/[^\s]+$/i.test(u), { message: "a picture must be an https:// link" });
+
+const UpdateProductInput = z.object({
+  productId: z.string().min(1),
+  name: z.string().min(1).max(80).optional(),
+  priceCents: z.number().int().min(0).max(100_000_000).optional(),
+  description: z.string().max(2000).optional(),
+  /** One line the shelf can show under the name. */
+  tagline: z.string().max(140).optional(),
+  tags: z.array(z.string().min(1).max(24)).max(8).optional(),
+  imageUrl: ImageUrl.optional(),
+  /** Off the shelves without losing the row, or back on. */
+  active: z.boolean().optional(),
+});
+
+const LookInput = z.object({
+  /** The picture across the top of the shop. */
+  heroUrl: ImageUrl.nullable().optional(),
+  /** The sentence under the shop's name. */
+  tagline: z.string().max(160).nullable().optional(),
+  /** One of the shop's own palettes, by name — never raw CSS. */
+  accent: z.enum(["stone", "amber", "rose", "emerald", "indigo"]).optional(),
 });
 
 const BrowseInput = z.object({
@@ -83,6 +121,8 @@ async function browse(ctx: PluginOpContext) {
     sku: p.sku,
     tags: p.tags ?? [],
     description: p.description,
+    tagline: p.tagline,
+    imageUrl: p.imageUrl,
   }));
   return { items, nextCursor: rows.length > take ? (items[items.length - 1]?.id ?? null) : null };
 }
@@ -97,6 +137,8 @@ async function addProduct(ctx: PluginOpContext) {
       priceCents: input.priceCents,
       ...(input.sku ? { sku: input.sku } : {}),
       ...(input.description ? { description: input.description } : {}),
+      ...(input.tagline ? { tagline: input.tagline } : {}),
+      ...(input.imageUrl ? { imageUrl: ImageUrl.parse(input.imageUrl) } : {}),
       tags: (input.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
     },
   });
@@ -108,6 +150,131 @@ async function addProduct(ctx: PluginOpContext) {
   // event is a no-op rather than a second bump.
   await recordCatalogueChange(ctx, `added ${p.name}`, p.id, p.tags ?? []);
   return { id: p.id, name: p.name, tags: p.tags ?? [] };
+}
+
+/**
+ * THE OWNER: a product's words and its picture.
+ *
+ * A shop is mostly writing. The first version of this app could only ADD a
+ * product, so a description written badly was permanent and a photograph taken
+ * later had nowhere to go — which is the same shape of hole as a catalogue you
+ * cannot search: the data was fine and the shop could not be run.
+ *
+ * Only the fields named are touched, so setting a picture does not blank a
+ * description somebody wrote. `active: false` takes a thing off the shelves and
+ * keeps the row, which is what a shop actually wants for last winter's stock —
+ * and for the rows a test left behind.
+ */
+async function updateProduct(ctx: PluginOpContext) {
+  const input = UpdateProductInput.parse(ctx.args) as {
+    productId: string;
+    name?: string;
+    priceCents?: number;
+    description?: string;
+    tagline?: string;
+    tags?: string[];
+    imageUrl?: string;
+    active?: boolean;
+  };
+  const d = await db(ctx);
+  const [before] = await d.product.findMany({ where: { id: input.productId }, take: 1, includeDeleted: false });
+  if (!before) throw new Error(`no product ${input.productId} in this shop`);
+  const tags = input.tags ? input.tags.map((t) => t.trim().toLowerCase()).filter(Boolean) : undefined;
+  const p = await d.product.update({
+    where: { id: input.productId },
+    data: {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.priceCents !== undefined ? { priceCents: input.priceCents } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.tagline !== undefined ? { tagline: input.tagline } : {}),
+      ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl } : {}),
+      ...(input.active !== undefined ? { active: input.active } : {}),
+      ...(tags ? { tags } : {}),
+    },
+  });
+  // The shelf changed if the DEPARTMENTS or the pictures did — every open
+  // storefront re-reads on a catalogue change, so the id is derived from the
+  // product and the reason, and a second identical edit is a no-op.
+  await recordCatalogueChange(ctx, `changed ${p.name}`, `${p.id}:${changeKindOf(input)}`, p.tags ?? []);
+  return { id: p.id, name: p.name, active: p.active, imageUrl: p.imageUrl ?? null, tagline: p.tagline ?? null };
+}
+
+/** What KIND of edit this was, so two different edits are two changes. */
+function changeKindOf(input: Record<string, unknown>): string {
+  return Object.keys(input)
+    .filter((k) => k !== "productId")
+    .sort()
+    .join("+") || "nothing";
+}
+
+/**
+ * THE OWNER: how the shop LOOKS — the picture across the top, the sentence
+ * under its name, the accent.
+ *
+ * On the timeline rather than in a table, because it is one small fact about
+ * the whole shop that every open page must re-read the moment it changes, and
+ * because a look is the kind of thing somebody will want to undo. `null`
+ * clears; a field left out is left alone.
+ */
+async function setLook(ctx: PluginOpContext) {
+  const input = LookInput.parse(ctx.args ?? {}) as { heroUrl?: string | null; tagline?: string | null; accent?: string };
+  if (input.heroUrl === undefined && input.tagline === undefined && input.accent === undefined) {
+    throw new Error("say what to change: heroUrl, tagline or accent");
+  }
+  await ctx.emit(shopLookSetEvent.eventName, {
+    ...(input.heroUrl !== undefined ? { heroUrl: input.heroUrl } : {}),
+    ...(input.tagline !== undefined ? { tagline: input.tagline } : {}),
+    ...(input.accent !== undefined ? { accent: input.accent } : {}),
+    at: Date.now(),
+  });
+  return { heroUrl: input.heroUrl ?? null, tagline: input.tagline ?? null, accent: input.accent ?? null };
+}
+
+/**
+ * STAFF: a notice across the top of the shop ("closed Monday", "the bread is
+ * out early today"). The op emits it, like every other fact — the storefront
+ * reads the fold, so a notice appears on every open page without a refresh.
+ * An empty text CLEARS the board rather than posting a blank.
+ */
+async function postNotice(ctx: PluginOpContext) {
+  const { text } = z.object({ text: z.string().max(200) }).parse(ctx.args) as { text: string };
+  const trimmed = text.trim();
+  await ctx.emit(announcedEvent.eventName, {
+    id: `notice:${Date.now()}`,
+    text: trimmed,
+    at: Date.now(),
+  });
+  return { text: trimmed, cleared: !trimmed };
+}
+
+/**
+ * WHO ELSE RUNS THIS SHOP.
+ *
+ * The owner types somebody's esoul email and picks one of the shop's own
+ * words. Everything that decides whether that is allowed belongs to the
+ * PLATFORM — the caller must own the app, the email must be a real account,
+ * the word must be one `plugin.json` declares — so these two ops are
+ * deliberately thin. An app that checked this itself would be an app that
+ * could get it wrong.
+ *
+ * `role: ""` takes access back.
+ */
+async function listPeople(ctx: PluginOpContext) {
+  const { listAppRoles } = await import("esoul-sdk/server");
+  return listAppRoles(ctx);
+}
+
+async function setPersonRole(ctx: PluginOpContext) {
+  const { email, role } = z
+    .object({ email: z.string().min(3).max(200), role: z.string().max(40) })
+    .parse(ctx.args) as { email: string; role: string };
+  const { setAppRole } = await import("esoul-sdk/server");
+  const r = await setAppRole(ctx, { email, role });
+  // The refusal is the platform's own words — "no esoul account has that
+  // email", "this app has no role called manager" — and a person fixing a typo
+  // needs to read exactly that, not "forbidden".
+  if (!r.ok) throw new Error(r.error ?? "that did not work");
+  return { email: r.email ?? email, role: r.role ?? "", removed: !r.role };
 }
 
 /**
@@ -291,7 +458,16 @@ async function product(ctx: PluginOpContext) {
   const d = await db(ctx);
   const [p] = await d.product.findMany({ where: { id: productId }, take: 1 });
   if (!p || !p.active) throw new Error(`no product ${productId} in this shop`);
-  return { id: p.id, name: p.name, priceCents: p.priceCents, sku: p.sku, description: p.description, tags: p.tags ?? [] };
+  return {
+    id: p.id,
+    name: p.name,
+    priceCents: p.priceCents,
+    sku: p.sku,
+    description: p.description,
+    tagline: p.tagline,
+    imageUrl: p.imageUrl,
+    tags: p.tags ?? [],
+  };
 }
 
 /**
@@ -647,6 +823,11 @@ export const pluginServer: PluginServerModule = {
     me,
     checkout,
     "add-product": addProduct,
+    "update-product": updateProduct,
+    "set-look": setLook,
+    "post-notice": postNotice,
+    "list-people": listPeople,
+    "set-person-role": setPersonRole,
     "place-order": placeOrder,
     "list-orders": listOrders,
     sales,
