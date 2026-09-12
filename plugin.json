@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "shop-demo",
   "name": "Shop (demo)",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "The SDK's reference app \u2014 the smallest thing that touches every access capability once: a catalogue anyone may browse, orders a signed-in customer places and sees only their own, a staff desk, and an owner who sets prices. Orders and addresses live in the app's own tables (plugin.json `db`), scoped by the platform; the catalogue version lives on the timeline.",
   "applicationType": "plugin_shop_demo",
   "entry": "app",
@@ -105,7 +105,8 @@
     "set-order-status": {},
     "add-product": {},
     "fulfil-order": {},
-    "order-notice": {}
+    "order-notice": {},
+    "sales": {}
   },
   "routes": {
     "order-updates": {
@@ -238,6 +239,51 @@
             "note"
           ]
         },
+        "delete": [
+          "owner"
+        ]
+      }
+    },
+    "OrderLine": {
+      "scope": "instance",
+      "owner": "creator",
+      "fields": {
+        "order": "ref:Order",
+        "product": "ref:Product?",
+        "name": "string",
+        "sku": "string?",
+        "qty": "int",
+        "priceCents": "int"
+      },
+      "indexes": [
+        [
+          "order"
+        ],
+        [
+          "product",
+          "createdAt"
+        ],
+        [
+          "createdAt"
+        ]
+      ],
+      "rules": {
+        "read": [
+          "creator",
+          "staff",
+          "owner"
+        ],
+        "create": {
+          "roles": [
+            "customer",
+            "staff",
+            "owner"
+          ],
+          "requires": "account"
+        },
+        "update": [
+          "owner"
+        ],
         "delete": [
           "owner"
         ]

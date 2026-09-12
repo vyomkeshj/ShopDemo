@@ -11,8 +11,12 @@ export type Filter<V> =
   | { lt: V }
   | { lte: V }
   | { contains: string };
+/** A LIST field takes one question: does it hold this? (a `contains` index answers it) */
+export type ListFilter<V> = { has: V };
 /** Only INDEXED fields may be filtered — the generator emits the union per model. */
-export type Where<T, K extends keyof T> = { [P in K]?: T[P] extends Scalar ? Filter<T[P]> : never };
+export type Where<T, K extends keyof T> = {
+  [P in K]?: T[P] extends readonly (infer E)[] ? ListFilter<E> : T[P] extends Scalar ? Filter<T[P]> : never;
+};
 export type OrderBy<K extends string> = { [P in K]?: "asc" | "desc" };
 
 export interface FindManyArgs<T, K extends keyof T & string> {
@@ -73,7 +77,7 @@ export interface ProductCreate {
   description?: string | null;
   tags?: string[];
 }
-export type ProductFilterable = "active" | "createdAt" | "id" | "ownerId" | "sku";
+export type ProductFilterable = "active" | "createdAt" | "id" | "name" | "ownerId" | "sku" | "tags";
 
 export interface CartLineRow {
   id: string;
@@ -115,6 +119,30 @@ export interface OrderCreate {
 }
 export type OrderFilterable = "createdAt" | "id" | "ownerId" | "product" | "status";
 
+export interface OrderLineRow {
+  id: string;
+  workspaceId: string;
+  nodeId: string;
+  ownerId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  order: string;
+  product: string | null;
+  name: string;
+  sku: string | null;
+  qty: number;
+  priceCents: number;
+}
+export interface OrderLineCreate {
+  order: string;
+  product?: string | null;
+  name: string;
+  sku?: string | null;
+  qty: number;
+  priceCents: number;
+}
+export type OrderLineFilterable = "createdAt" | "id" | "order" | "ownerId" | "product";
+
 export interface AddressRow {
   id: string;
   workspaceId: string;
@@ -135,6 +163,8 @@ export interface ShopDemoDb {
   product: Collection<ProductRow, ProductCreate, ProductFilterable>;
   cartLine: Collection<CartLineRow, CartLineCreate, CartLineFilterable>;
   order: Collection<OrderRow, OrderCreate, OrderFilterable>;
+  orderLine: Collection<OrderLineRow, OrderLineCreate, OrderLineFilterable>;
   address: Collection<AddressRow, AddressCreate, AddressFilterable>;
   $transaction<T>(fn: (tx: ShopDemoDb) => Promise<T>): Promise<T>;
 }
+

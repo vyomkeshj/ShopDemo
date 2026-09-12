@@ -145,6 +145,13 @@ async function priceAndPlace(
   wanted: Wanted[],
   shipTo: ShipToAddress,
   note?: string,
+  /**
+   * Anything else that must be true the moment the order exists, and false if
+   * it does not — emptying the basket is the one caller. It runs inside the
+   * SAME transaction as the order, so there is no instant where an order is
+   * written and the basket that made it is still full.
+   */
+  alsoInTheSameBreath?: (tx: Awaited<ReturnType<typeof db>>) => Promise<void>,
 ) {
   const ids = [...new Set(wanted.map((l) => l.productId))];
   const products = await d.product.findMany({ where: { id: { in: ids }, active: true }, take: 200 });
@@ -162,25 +169,83 @@ async function priceAndPlace(
   // here ("only 2 free") is the ledger's own words, and the customer sees it
   // instead of an order the shop cannot fill.
   const stock = ctx.apps?.stock;
-  if (stock) {
-    for (const l of lines) {
-      const sku = byId.get(l.productId)?.sku;
-      if (!sku) continue;
-      const held = await stock.call("reserve_stock", { sku, qty: l.qty });
-      if (!held.ok) throw new Error(`cannot take this order: ${held.text}`);
+  /** What this attempt is holding in the warehouse, so it can be given back. */
+  const held: { sku: string; qty: number }[] = [];
+  /**
+   * GIVE THE GOODS BACK. A reservation the order never used is worse than a
+   * refusal: nothing says it is stale, so the shelf reads empty while the
+   * goods sit there. The release is best-effort per line and never throws —
+   * the customer's error is the reason they came here, not the tidying-up.
+   */
+  const releaseWhatWeHeld = async () => {
+    for (const h of held.reverse()) {
+      try {
+        const back = await stock!.call("release_stock", h);
+        if (!back.ok) console.error(`[shop-demo] held stock not released: ${h.qty}x ${h.sku} — ${back.text}`);
+      } catch (err) {
+        console.error(`[shop-demo] held stock not released: ${h.qty}x ${h.sku} — ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
-  }
+  };
 
-  const order = await d.order.create({
-    data: {
-      totalCents,
-      lines,
-      shipTo,
-      ...(note ? { note } : {}),
-      // The first line's product, as the relation the rules check for scope.
-      product: lines[0]!.productId,
-    },
-  });
+  let order: { id: string };
+  try {
+    if (stock) {
+      for (const l of lines) {
+        const sku = byId.get(l.productId)?.sku;
+        if (!sku) continue;
+        const reserved = await stock.call("reserve_stock", { sku, qty: l.qty });
+        if (!reserved.ok) throw new Error(`cannot take this order: ${reserved.text}`);
+        held.push({ sku, qty: l.qty });
+      }
+    }
+    // ONE BREATH: the order and whatever must stop being true when it exists.
+    // A basket emptied after a committed order was two writes with a gap in
+    // between, and every gap is a real state someone's session can end in —
+    // an order paid for with a basket still holding it, which is how people
+    // buy twice (2026-09-12).
+    order = await d.$transaction(async (tx) => {
+      const written = await tx.order.create({
+        data: {
+          totalCents,
+          lines,
+          shipTo,
+          ...(note ? { note } : {}),
+          // The first line's product, as the relation the rules check for scope.
+          product: lines[0]!.productId,
+        },
+      });
+      // ONE ROW PER THING SOLD, in the same breath as the order.
+      //
+      // `Order.lines` is the RECEIPT: what this person bought, at the prices
+      // they paid, in one blob the order page renders. It answers a question
+      // about ONE order and no question about the shop — "how much Earl Grey
+      // did we sell in September" cannot be asked of a json column without
+      // reading every order ever placed. These rows can be asked, by index.
+      // They carry the price AT THE TIME, which is the other half: the
+      // catalogue's price today is not what September's sales were worth.
+      for (const l of lines) {
+        await tx.orderLine.create({
+          data: {
+            order: written.id,
+            product: l.productId,
+            name: l.name,
+            ...(byId.get(l.productId)?.sku ? { sku: byId.get(l.productId)!.sku } : {}),
+            qty: l.qty,
+            priceCents: l.priceCents,
+          },
+        });
+      }
+      if (alsoInTheSameBreath) await alsoInTheSameBreath(tx);
+      return written;
+    });
+  } catch (err) {
+    // Nothing was ordered, so nothing stays held. This is the whole reason the
+    // reservation loop lives inside the try: a second line refusing used to
+    // leave the first line's goods held for good (2026-09-12).
+    await releaseWhatWeHeld();
+    throw err;
+  }
 
   // Ring the desk. Anyone who may PLACE an order may ring it — the manifest's
   // `channel.topics["new-order"].mayAddress` names them — and none of them can
@@ -338,14 +403,108 @@ async function checkout(ctx: PluginOpContext) {
   // rather than posting it to an empty label.
   const name = shipTo.name?.trim() || who?.name?.trim() || "";
   if (!name) throw new Error("we need a name for the parcel — type one, or sign in so we can use your account's");
-  const placed = await priceAndPlace(ctx, d, cart.lines.map((l) => ({ productId: l.productId, qty: l.qty })), { ...shipTo, name }, note);
-  const mine = await d.cartLine.findMany({ take: 100 });
-  for (const l of mine) await d.cartLine.delete({ where: { id: l.id } });
+  // The basket is emptied INSIDE the order's transaction: either the order
+  // exists and the basket is empty, or neither happened. `deleteMany` with no
+  // `where` is every line the CALLER may delete — the manifest scopes
+  // `CartLine` to the user, so it is their own basket and nobody else's.
+  const placed = await priceAndPlace(
+    ctx,
+    d,
+    cart.lines.map((l) => ({ productId: l.productId, qty: l.qty })),
+    { ...shipTo, name },
+    note,
+    async (tx) => {
+      await tx.cartLine.deleteMany();
+    },
+  );
   await cartChanged(ctx, { lines: [], totalCents: 0 });
   // The receipt has somewhere to go. The shop does not STORE the address — it
   // belongs to the person's esoul account, and asking again next time costs
   // one read.
   return { ...placed, receiptTo: who?.email ?? null };
+}
+
+/**
+ * WHAT SOLD — the question a shop actually asks its own till.
+ *
+ * Every line is a row, so this is index work rather than a walk over every
+ * order: one product's history is `where: { product }`, a period is a cursor
+ * page down `createdAt`. It answers in money and units, and it says the date
+ * it can see back to — because `OrderLine` began with 0.6.0 and an order
+ * placed before that has a receipt but no rows, and a total that quietly
+ * omits last month is worse than one that names its horizon.
+ *
+ * Staff and the owner: the rules give them every row of this shop, and give a
+ * customer only their own, so a customer calling this gets their own history
+ * rather than a refusal.
+ */
+/**
+ * A page of sales. `take + 1` is how "is there more" stops being a guess, and
+ * the client refuses a `take` over 200 — so the page itself must leave room
+ * for that extra row. Asking for 200 and being refused at 201 is the kind of
+ * off-by-one that only ever appears once somebody runs it.
+ */
+const SALES_PAGE = 100;
+
+const SalesInput = z.object({
+  /** One product's history, when you want it. */
+  productId: z.string().min(1).optional(),
+  /** ISO date, or anything `new Date` reads. Sales from this moment on. */
+  since: z.string().min(4).optional(),
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(SALES_PAGE).optional(),
+});
+
+async function sales(ctx: PluginOpContext) {
+  const { productId, since, cursor, limit } = SalesInput.parse(ctx.args ?? {});
+  const d = await db(ctx);
+  const from = since ? new Date(since) : null;
+  if (from && Number.isNaN(from.getTime())) throw new Error(`"${since}" is not a date I can read`);
+  const take = limit ?? SALES_PAGE;
+  const rows = await d.orderLine.findMany({
+    where: {
+      ...(productId ? { product: productId } : {}),
+      ...(from ? { createdAt: { gte: from } } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor } } : {}),
+  });
+  const page = rows.slice(0, take);
+  // Money and units per product, over the page. The caller walks the pages;
+  // this never pretends to have summed rows it did not read.
+  const byProduct = new Map<string, { productId: string | null; name: string; units: number; centsSold: number }>();
+  for (const l of page) {
+    const key = l.product ?? `name:${l.name}`;
+    const seen = byProduct.get(key) ?? { productId: l.product ?? null, name: l.name, units: 0, centsSold: 0 };
+    seen.units += l.qty;
+    seen.centsSold += l.qty * l.priceCents;
+    byProduct.set(key, seen);
+  }
+  const products = [...byProduct.values()].sort((a, b) => b.centsSold - a.centsSold);
+  // HOW FAR BACK THIS CAN SEE. One indexed row, so it costs nothing to be
+  // honest about.
+  const [earliest] = await d.orderLine.findMany({ orderBy: { createdAt: "asc" }, take: 1 });
+  return {
+    lines: page.map((l) => ({
+      orderId: l.order,
+      productId: l.product,
+      name: l.name,
+      sku: l.sku,
+      qty: l.qty,
+      priceCents: l.priceCents,
+      at: l.createdAt instanceof Date ? l.createdAt.toISOString() : String(l.createdAt),
+    })),
+    products,
+    unitsSold: products.reduce((n, p) => n + p.units, 0),
+    centsSold: products.reduce((n, p) => n + p.centsSold, 0),
+    nextCursor: rows.length > take ? (page[page.length - 1]?.id ?? null) : null,
+    countsSalesFrom: earliest
+      ? earliest.createdAt instanceof Date
+        ? earliest.createdAt.toISOString()
+        : String(earliest.createdAt)
+      : null,
+  };
 }
 
 /** Whatever this caller may see: their own orders, or the whole desk. */
@@ -490,6 +649,7 @@ export const pluginServer: PluginServerModule = {
     "add-product": addProduct,
     "place-order": placeOrder,
     "list-orders": listOrders,
+    sales,
     refund,
     "set-order-status": setOrderStatus,
     "order-notice": orderNotice,
