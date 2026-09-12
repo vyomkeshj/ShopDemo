@@ -15,6 +15,9 @@ jest.mock("esoul-sdk/react", () => ({
   useAppCanEdit: () => viewer.canEdit,
   useViewer: () => viewer,
   useSignInWall: () => ({ needed: wallNeeded, reason: wallNeeded ? "sign in" : null, signIn: () => undefined, raise: () => undefined }),
+  // The screen subscribes to its own channel so a customer's page moves when
+  // their order does. Quiet here; `shop-demo.test.ts` proves the wiring.
+  usePluginRealtime: () => ({ data: [], latestData: null, error: null, state: "idle" }),
 }));
 jest.mock("esoul-sdk", () => ({
   ...jest.requireActual("esoul-sdk"),
@@ -27,40 +30,98 @@ import { ShopDemoUi } from "./ui/shop-demo-ui";
 
 const IDENT = { workspaceId: "ws1", nodeId: "node1", applicationType: "plugin_shop_demo", instanceName: "Corner shop" };
 const state = { ...IDENT, catalogueVersion: 0, announcements: [] } as never;
-const render = () => renderToString(<ShopDemoUi state={state} />).replace(/<!-- -->/g, "");
+/** The words a person would actually read, with the markup taken out. */
+const render = () =>
+  renderToString(<ShopDemoUi state={state} />)
+    .replace(/<!-- -->/g, "")
+    .replace(/<svg[\s\S]*?<\/svg>/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-describe("ShopDemoUi — the screen follows the viewer", () => {
-  it("a customer sees the catalogue and 'Your orders', never the desk", () => {
+describe("ShopDemoUi — four people, four shops", () => {
+  it("a CUSTOMER gets the storefront, a basket and a way to their own orders — never the desk", () => {
     viewer = { kind: "visitor", role: "customer", userId: "u1", canEdit: false, signedIn: true };
-    const html = render();
-    expect(html).toContain("Corner shop");
-    expect(html).toContain("you are: customer");
-    expect(html).toContain("Your orders");
-    expect(html).not.toContain("the desk");
-    expect(html).not.toContain("Add a product");
+    const text = render();
+    expect(text).toContain("Corner shop");
+    expect(text).toContain("Fresh things, ordered in one tap");
+    expect(text).toContain("you are: customer");
+    expect(text).toContain("Everything on the shelves today");
+    expect(text).toContain("Basket");
+    expect(text).toContain("Orders");
+    // The desk's words are the ones a customer must never see.
+    expect(text).not.toContain("The desk");
+    expect(text).not.toContain("every order of this shop");
+    expect(text).not.toContain("Add something to sell");
   });
 
-  it("staff see the desk and not the price form", () => {
+  it("STAFF get the desk, and not the price list or a basket", () => {
     viewer = { kind: "member", role: "staff", userId: "u2", canEdit: true, signedIn: true };
-    const html = render();
-    expect(html).toContain("Orders — the desk");
-    expect(html).not.toContain("Add a product");
+    const text = render();
+    expect(text).toContain("The desk");
+    expect(text).toContain("every order of this shop");
+    expect(text).toContain("What the shop sells");
+    expect(text).not.toContain("Add something to sell");
+    expect(text).not.toContain("Basket"); // the people who run a shop do not shop in it here
   });
 
-  it("the owner sees the desk AND the price form", () => {
+  it("the OWNER gets the desk AND the price list, with a place for a description and departments", () => {
     viewer = { kind: "owner", role: "owner", userId: "u0", canEdit: true, signedIn: true };
-    const html = render();
-    expect(html).toContain("Orders — the desk");
-    expect(html).toContain("Add a product");
+    const text = render();
+    expect(text).toContain("The desk");
+    expect(text).toContain("Add something to sell");
+    expect(text).toContain("Stock code");
+    expect(text).toContain("What it is");
+    expect(text).toContain("Departments");
   });
 
-  it("a signed-out visitor gets the catalogue and, once the wall is raised, a sign-in button — and no orders section", () => {
+  it("a SIGNED-OUT visitor gets the shelves and a reason to sign in — and no orders of anyone's", () => {
     viewer = { kind: "anonymous", role: "customer", userId: null as never, canEdit: false, signedIn: false };
     wallNeeded = true;
-    const html = render();
-    expect(html).toContain("not signed in");
-    expect(html).toContain("Sign in");
-    expect(html).not.toContain("Your orders");
+    const text = render();
+    expect(text).toContain("not signed in");
+    expect(text).toContain("Sign in to order");
+    expect(text).toContain("Everything on the shelves today"); // the shelves are open to anyone
+    expect(text).toContain("Basket"); // they may fill one; ordering is what needs an account
+    expect(text).not.toContain("The desk");
+    // No orders page and no link to one.
+    expect(text).not.toMatch(/Your orders|Nothing ordered yet/);
     wallNeeded = false;
+  });
+
+  it("the owner's price list is hidden when the workspace says read-only — a word is not a permission", () => {
+    viewer = { kind: "owner", role: "owner", userId: "u0", canEdit: false, signedIn: true };
+    expect(render()).not.toContain("Add something to sell");
+  });
+});
+
+/**
+ * A shop should look like a shop before anyone has uploaded a photograph, so
+ * a product's picture is chosen from what it is called — and from its stock
+ * code, because "Earl Grey" and "Linen apron" do not say what they are while
+ * TEA-01 and APR-01 do.
+ */
+describe("the picture a product gets", () => {
+  const { iconFor } = require("./ui/shop-demo-ui") as { iconFor: (n: string, s?: string | null) => { displayName?: string; name?: string } };
+  const name = (n: string, s?: string | null) => {
+    const I = iconFor(n, s) as unknown as { displayName?: string; name?: string; render?: { displayName?: string } };
+    return I.displayName ?? I.render?.displayName ?? I.name ?? "";
+  };
+
+  it("reads the NAME when the name says what it is", () => {
+    expect(name("Butter cookies")).toBe("Cookie");
+    expect(name("Red wine")).toBe("Wine");
+    expect(name("Sunflowers")).toBe("Flower2");
+    expect(name("Gift card")).toBe("Gift");
+  });
+
+  it("reads the STOCK CODE when the name does not — Earl Grey is tea, a Linen apron is worn", () => {
+    expect(name("Earl Grey", "TEA-01")).toBe("Coffee");
+    expect(name("Linen apron", "APR-01")).toBe("Shirt"); // "linen" and "apron" both land it
+  });
+
+  it("is stable: the same product always gets the same picture, matched or not", () => {
+    expect(name("Zarf", "ZZZ-9")).toBe(name("Zarf", "ZZZ-9"));
+    expect(name("Zarf", "ZZZ-9")).not.toBe("");
   });
 });

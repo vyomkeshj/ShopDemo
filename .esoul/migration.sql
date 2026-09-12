@@ -15,8 +15,26 @@ CREATE TABLE "plugin_shop_demo__product" (
     "priceCents" INTEGER NOT NULL,
     "sku" TEXT,
     "active" BOOLEAN NOT NULL DEFAULT true,
+    "description" TEXT,
+    "tags" TEXT[],
 
     CONSTRAINT "plugin_shop_demo__product_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "plugin_shop_demo__cart_line" (
+    "id" TEXT NOT NULL,
+    "workspaceId" TEXT NOT NULL,
+    "nodeId" TEXT NOT NULL,
+    "ownerId" TEXT,
+    "createdBy" JSONB,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "deletedAt" TIMESTAMP(3),
+    "product" TEXT NOT NULL,
+    "qty" INTEGER NOT NULL DEFAULT 1,
+
+    CONSTRAINT "plugin_shop_demo__cart_line_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -63,6 +81,15 @@ CREATE INDEX "plugin_shop_demo__product_nodeId_sku_idx" ON "plugin_shop_demo__pr
 
 -- CreateIndex
 CREATE INDEX "plugin_shop_demo__product_nodeId_active_idx" ON "plugin_shop_demo__product"("nodeId", "active");
+
+-- CreateIndex
+CREATE INDEX "plugin_shop_demo__cart_line_workspaceId_nodeId_idx" ON "plugin_shop_demo__cart_line"("workspaceId", "nodeId");
+
+-- CreateIndex
+CREATE INDEX "plugin_shop_demo__cart_line_ownerId_idx" ON "plugin_shop_demo__cart_line"("ownerId");
+
+-- CreateIndex
+CREATE INDEX "plugin_shop_demo__cart_line_nodeId_product_idx" ON "plugin_shop_demo__cart_line"("nodeId", "product");
 
 -- CreateIndex
 CREATE INDEX "plugin_shop_demo__order_workspaceId_nodeId_idx" ON "plugin_shop_demo__order"("workspaceId", "nodeId");

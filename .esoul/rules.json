@@ -28,6 +28,16 @@
           "optional": false,
           "list": false,
           "default": true
+        },
+        "description": {
+          "type": "text",
+          "optional": true,
+          "list": false
+        },
+        "tags": {
+          "type": "string",
+          "optional": false,
+          "list": true
         }
       },
       "sealed": [],
@@ -86,6 +96,90 @@
             {
               "t": "role",
               "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        }
+      }
+    },
+    "CartLine": {
+      "name": "CartLine",
+      "key": "cartLine",
+      "scope": "instance",
+      "ownedByCreator": true,
+      "fields": {
+        "product": {
+          "type": "ref",
+          "optional": false,
+          "list": false,
+          "ref": "Product"
+        },
+        "qty": {
+          "type": "int",
+          "optional": false,
+          "list": false,
+          "default": 1
+        }
+      },
+      "sealed": [],
+      "unique": [],
+      "indexes": [
+        [
+          "product"
+        ]
+      ],
+      "filterable": [
+        "createdAt",
+        "id",
+        "ownerId",
+        "product"
+      ],
+      "rules": {
+        "read": {
+          "principals": [
+            {
+              "t": "creator"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "create": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "customer"
+            },
+            {
+              "t": "role",
+              "role": "staff"
+            },
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": true,
+          "creatorMay": null,
+          "fields": null
+        },
+        "update": {
+          "principals": [
+            {
+              "t": "creator"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "delete": {
+          "principals": [
+            {
+              "t": "creator"
             }
           ],
           "requiresAccount": false,

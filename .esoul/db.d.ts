@@ -62,14 +62,34 @@ export interface ProductRow {
   priceCents: number;
   sku: string | null;
   active: boolean;
+  description: string | null;
+  tags: string[];
 }
 export interface ProductCreate {
   name: string;
   priceCents: number;
   sku?: string | null;
   active?: boolean;
+  description?: string | null;
+  tags?: string[];
 }
 export type ProductFilterable = "active" | "createdAt" | "id" | "ownerId" | "sku";
+
+export interface CartLineRow {
+  id: string;
+  workspaceId: string;
+  nodeId: string;
+  ownerId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  product: string;
+  qty: number;
+}
+export interface CartLineCreate {
+  product: string;
+  qty?: number;
+}
+export type CartLineFilterable = "createdAt" | "id" | "ownerId" | "product";
 
 export interface OrderRow {
   id: string;
@@ -113,6 +133,7 @@ export type AddressFilterable = "createdAt" | "id" | "ownerId";
 
 export interface ShopDemoDb {
   product: Collection<ProductRow, ProductCreate, ProductFilterable>;
+  cartLine: Collection<CartLineRow, CartLineCreate, CartLineFilterable>;
   order: Collection<OrderRow, OrderCreate, OrderFilterable>;
   address: Collection<AddressRow, AddressCreate, AddressFilterable>;
   $transaction<T>(fn: (tx: ShopDemoDb) => Promise<T>): Promise<T>;

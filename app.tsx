@@ -17,6 +17,9 @@
 // because the rules already decided what each caller's client can see.
 import { z } from "zod";
 import {
+  defineBindingEvent,
+  definePluginChannel,
+  type BindingHolder,
   EventTypes,
   incompleteStateNotice,
   nanoid,
@@ -37,11 +40,35 @@ export interface ShopAnnouncement {
   at: number;
 }
 
-export interface ShopDemoData extends ApplicationIdentifier {
+/**
+ * The shop's slots, from its manifest. A `stock` slot is OPTIONAL: a shop with
+ * no warehouse behind it still sells — it simply cannot hold anything back.
+ */
+export const SHOP_SLOTS = ["stock"] as const;
+
+/** The owner's consent, on the timeline: which app fills which slot. */
+export const bindingSetEvent = defineBindingEvent<ShopDemoData>({ applicationType: APP_TYPE, slots: SHOP_SLOTS });
+
+export interface ShopDelivery {
+  /** `<orderId>:<status>` — one delivery per status per order, so a retry is not a second email. */
+  id: string;
+  orderId: string;
+  status: string;
+  at: number;
+}
+
+export interface ShopDemoData extends ApplicationIdentifier, BindingHolder {
   /** Bumped whenever the catalogue changes, so every open UI refetches it. */
   catalogueVersion: number;
   /** Staff notes to customers ("closed on Monday"). Small, shared, scrubbable. */
   announcements: ShopAnnouncement[];
+  /**
+   * What the shop has told which customer. The point is IDEMPOTENCE: a task
+   * that retries — and a durable task will — must not tell the same person the
+   * same thing twice, and the only honest record of "already told" is one the
+   * retry can read. It is on the timeline, so it can also be looked at.
+   */
+  deliveries: ShopDelivery[];
 }
 
 const MAX_ANNOUNCEMENTS = 20;
@@ -102,6 +129,69 @@ export const announcedEvent: EventDefinition<ShopDemoData> = {
   },
 };
 
+/**
+ * The shop's realtime channel, in code. The manifest says WHO hears each topic
+ * (`channel.topics[*].audience`); this says what the topics ARE and what rides
+ * on them. Both halves are needed: without the manifest the platform mints one
+ * channel for everyone, and without this the mint has no topics to issue.
+ */
+export const shopChannel = definePluginChannel({
+  applicationType: APP_TYPE,
+  topics: {
+    /** The catalogue moved. Anyone watching the shop may hear it. */
+    catalogue: { schema: z.object({ what: z.string() }) },
+    /** ONE customer's order moved. Only they hear it (`audience: viewer`). */
+    "order-status": { schema: z.object({ orderId: z.string(), status: z.string(), to: z.string().optional(), by: z.string().optional() }) },
+    /** A new order reached the desk. Only staff hear it (`audience: role:staff`). */
+    "new-order": { schema: z.object({ orderId: z.string(), totalCents: z.number() }) },
+    /** This person's own basket moved — so an open screen and the agent agree. */
+    cart: { schema: z.object({ count: z.number(), totalCents: z.number() }) },
+  },
+});
+
+const MAX_DELIVERIES = 50;
+
+/** One telling, recorded. Idempotent by `<orderId>:<status>`. */
+export const toldCustomerEvent: EventDefinition<ShopDemoData> = {
+  eventName: "plugin_shop_demo_told_customer",
+  // Dispatched by the app's own TASK, never by a screen — but the platform's
+  // vocabulary for "an event" is Client/Workflow/Workspace, and a task's
+  // dispatch rides the same path a client one does.
+  type: EventTypes.Client,
+  triggerMeta: {
+    displayName: "Shop told a customer",
+    description: "Fires when the shop has told a customer their order moved. eventData: {orderId, status}.",
+    sampleVariables: ["event.orderId", "event.status"],
+  },
+  dataCreator: (args) =>
+    envelope("plugin_shop_demo_told_customer", args, {
+      orderId: String(args.orderId ?? ""),
+      status: String(args.status ?? ""),
+      at: args.at ?? Date.now(),
+    }),
+  processor: (state, event) => {
+    const d = event.eventData || {};
+    if (!d.orderId || !d.status) return state;
+    const id = `${d.orderId}:${d.status}`;
+    const list = state.deliveries ?? [];
+    if (list.some((x) => x.id === id)) return state; // a retry is not a second email
+    const row: ShopDelivery = { id, orderId: String(d.orderId), status: String(d.status), at: typeof d.at === "number" ? d.at : 0 };
+    return { ...state, deliveries: [row, ...list].slice(0, MAX_DELIVERIES) };
+  },
+};
+
+export interface Cart {
+  lines: { lineId: string; productId: string; name: string; qty: number; priceCents: number; sku: string | null; tags: string[] }[];
+  totalCents: number;
+}
+
+/** A basket in words — what a tool hands back, and what an agent reads aloud. */
+export function describeCart(cart: Cart, shopName: string): string {
+  if (!cart?.lines?.length) return `The basket at "${shopName}" is empty.`;
+  const lines = cart.lines.map((l) => `${l.qty} × ${l.name} — ${((l.priceCents * l.qty) / 100).toFixed(2)} (id ${l.productId})`);
+  return `${lines.join("\n")}\nTotal ${(cart.totalCents / 100).toFixed(2)}.`;
+}
+
 export function describeShop(s: Pick<ShopDemoData, "instanceName" | "catalogueVersion" | "announcements">): string {
   const n = s.announcements?.length ?? 0;
   return (
@@ -122,35 +212,108 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
    */
   tasks: [
     {
+      /**
+       * TELLING THE CUSTOMER — the durable half of a status change.
+       *
+       * A real shop sends an email here, and an email is slow, fails, and
+       * needs retrying: exactly the work that must not sit inside the request
+       * that moved the order. So `set-order-status` moves the record and kicks
+       * this, which survives the request and retries on its own.
+       *
+       * Three things make a retry safe, and a durable task WILL retry:
+       *   · every side effect is inside a `step.run`, so a replay does not
+       *     repeat one that already happened (the platform's oldest rule);
+       *   · the shop reads its own fold first and stops if this order already
+       *     went out at this status — "already told" has to be readable, or
+       *     idempotence is a hope;
+       *   · the record of telling is itself idempotent (`<orderId>:<status>`).
+       */
+      taskName: "tell-customer",
+      description: "Tell one customer their order moved — the durable half of a status change.",
+      concurrency: { limit: 5, scope: "per-app" },
+      handler: async (ctx) => {
+        const orderId = String(ctx.eventData?.orderId ?? "");
+        const status = String(ctx.eventData?.status ?? "");
+        if (!orderId || !status) throw new Error("tell-customer: eventData needs {orderId, status}");
+
+        // Already told? The fold is the record, and reading it costs nothing
+        // next to sending the same person the same email twice.
+        const already = await ctx.step.run("read-what-was-told", async () => {
+          const state = await ctx.getState();
+          return (state?.deliveries ?? []).some((d) => d.id === `${orderId}:${status}`);
+        });
+        if (already) return;
+
+        const order = await ctx.step.run("read-the-order", async () => {
+          const { callPluginOp } = await import("esoul-sdk");
+          return callPluginOp<{ id: string; status: string; ownerId: string | null; name: string | null }>(
+            PLUGIN_ID,
+            "order-notice",
+            ctx.identifier.nodeId,
+            { orderId },
+          );
+        });
+        // The order moved again while this was queued: what is true now wins,
+        // and the message for the older status is simply not sent.
+        if (!order || order.status !== status) return;
+
+        await ctx.step.run("tell-them", async () => {
+          // Where the email would go. It reaches ONE person: `order-status` is
+          // declared `audience: viewer`, so the platform hands no other
+          // customer a token for this channel.
+          if (!order.ownerId) return;
+          await ctx.notify(
+            "order-status",
+            { orderId, status, to: order.name ?? undefined, by: "the shop" },
+            { to: { viewerIds: [order.ownerId] } },
+          );
+        });
+
+        await ctx.step.run("record-that-we-told-them", async () => {
+          await ctx.dispatchEvent("plugin_shop_demo_told_customer", { orderId, status });
+        });
+      },
+    },
+    {
       taskName: "fulfil",
       description: "Mark an order of this shop fulfilled and notify the desk.",
       concurrency: { limit: 1, scope: "per-app" },
       handler: async (ctx) => {
         const orderId = String(ctx.eventData?.orderId ?? "");
         if (!orderId) throw new Error("fulfil: eventData.orderId is required");
-        await ctx.step.run("fulfil-order", async () => {
+        const order = await ctx.step.run("fulfil-order", async () => {
           const { callPluginOp } = await import("esoul-sdk");
-          await callPluginOp(PLUGIN_ID, "fulfil-order", ctx.identifier.nodeId, { orderId });
+          return callPluginOp<{ id: string; status: string; ownerId: string | null }>(PLUGIN_ID, "fulfil-order", ctx.identifier.nodeId, { orderId });
         });
-        await ctx.step.run("tell-the-desk", async () => {
-          await ctx.notify("order-status", { orderId, status: "fulfilled", by: ctx.kickedBy?.kind ?? "task" });
+        await ctx.step.run("tell-the-customer", async () => {
+          // ONE customer hears this. `order-status` is declared
+          // `audience: viewer`, so the message goes to the order owner's own
+          // channel and no other customer is handed a token for it. A task is
+          // the app's own code, which is why it may address someone at all.
+          if (!order?.ownerId) return;
+          await ctx.notify(
+            "order-status",
+            { orderId, status: "fulfilled", by: ctx.kickedBy?.kind ?? "task" },
+            { to: { viewerIds: [order.ownerId] } },
+          );
         });
       },
     },
   ],
   description:
     "The SDK's reference shop: a catalogue anyone may browse, orders a signed-in customer places and sees only their own, a staff desk, an owner who sets prices. Products, orders and addresses are the app's own tables, scoped by the platform.",
+  channel: shopChannel,
   reactNode: ShopDemoUi,
   reconstructStateFromEventLog: true,
-  events: [catalogueChangedEvent, announcedEvent],
+  events: [catalogueChangedEvent, announcedEvent, toldCustomerEvent, bindingSetEvent as never],
   getPorts: (): ApplicationPort[] => [],
-  stateCreator: (identifier) => ({ ...identifier, catalogueVersion: 0, announcements: [] }),
+  stateCreator: (identifier) => ({ ...identifier, catalogueVersion: 0, announcements: [], deliveries: [] }),
 
   getStateDescription: (state: ShopDemoData) => {
     const notice = incompleteStateNotice({
       title: "Shop",
       instanceName: state?.instanceName,
-      shape: { lists: { announcements: state?.announcements } },
+      shape: { lists: { announcements: state?.announcements, deliveries: state?.deliveries } },
     });
     if (notice) return notice;
     return describeShop(state);
@@ -175,6 +338,61 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
           return products.map((p) => `${p.name} — ${(p.priceCents / 100).toFixed(2)} (id ${p.id})`).join("\n");
         },
       },
+      [`product_detail_${base}`]: {
+        description: `Everything "${identifier.instanceName}" says about one product: what it is, what it costs, and how it is filed.`,
+        parameters: z.object({ productId: z.string().describe("The product id, as browse_shop shows it") }),
+        readOnly: true,
+        publicSafe: true,
+        execute: async (args: { productId: string }) => {
+          const p = await op<{ name: string; priceCents: number; sku: string | null; description: string | null; tags: string[] }>("product", args);
+          return [
+            `${p.name} — ${(p.priceCents / 100).toFixed(2)}`,
+            p.sku ? `stock code ${p.sku}` : null,
+            p.tags?.length ? `filed under ${p.tags.join(", ")}` : null,
+            p.description ?? "No description yet.",
+          ]
+            .filter(Boolean)
+            .join("\n");
+        },
+      },
+      // THE BASKET, as an agent works it. A person says "add two of the Earl
+      // Grey, actually make it three, now check out" and these are the three
+      // calls — each returning the WHOLE basket, so the answer the agent reads
+      // back is the state the screen shows.
+      [`add_to_cart_${base}`]: {
+        description: `Put a product in the caller's own basket at "${identifier.instanceName}" (adds to what is already there). Returns the whole basket.`,
+        parameters: z.object({ productId: z.string(), qty: z.number().int().min(1).max(99).optional() }),
+        execute: async (args: { productId: string; qty?: number }) => {
+          const cart = await op<Cart>("add-to-cart", args);
+          return describeCart(cart, identifier.instanceName);
+        },
+      },
+      [`view_cart_${base}`]: {
+        description: `What is in the caller's own basket at "${identifier.instanceName}", and what it comes to.`,
+        parameters: z.object({}),
+        readOnly: true,
+        execute: async () => describeCart(await op<Cart>("view-cart"), identifier.instanceName),
+      },
+      [`set_cart_quantity_${base}`]: {
+        description: `Change how many of one product are in the caller's basket at "${identifier.instanceName}". Zero takes it out.`,
+        parameters: z.object({ productId: z.string(), qty: z.number().int().min(0).max(99) }),
+        execute: async (args: { productId: string; qty: number }) => {
+          const cart = await op<Cart>("set-cart-qty", args);
+          return describeCart(cart, identifier.instanceName);
+        },
+      },
+      [`checkout_${base}`]: {
+        description: `Buy what is in the caller's basket at "${identifier.instanceName}". Needs a name and an address; the shop prices it from the catalogue, not from the basket.`,
+        parameters: z.object({
+          shipTo: z.object({ name: z.string(), street: z.string(), city: z.string() }),
+          note: z.string().max(280).optional(),
+        }),
+        execute: async (args: unknown) => {
+          const r = await op<{ orderId: string; totalCents: number }>("checkout", args);
+          eventCallback(catalogueChangedEvent.dataCreator({ ...idArgs, what: `order ${r.orderId} placed` }));
+          return `Order ${r.orderId} placed — ${(r.totalCents / 100).toFixed(2)}. The basket is empty again.`;
+        },
+      },
       [`place_order_${base}`]: {
         description: `Place an order in "${identifier.instanceName}" for the CALLER (they must be signed in). Lines are product ids and quantities; the server prices them.`,
         parameters: z.object({
@@ -197,13 +415,32 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
           return orders.map((o) => `${o.id} · ${o.status} · ${(o.totalCents / 100).toFixed(2)} · ${o.createdAt}`).join("\n");
         },
       },
+      [`set_order_status_${base}`]: {
+        description: `Move an order of "${identifier.instanceName}" along: new → preparing → shipped → fulfilled, or refunded. Staff and the owner only. Returns the address to ship to, so the next thing said can be the label.`,
+        parameters: z.object({
+          orderId: z.string().describe("The order id, as list_orders shows it"),
+          status: z.enum(["new", "preparing", "shipped", "fulfilled", "refunded"]),
+        }),
+        execute: async (args: { orderId: string; status: string }) => {
+          const r = await op<{ id: string; status: string; shipTo: { name?: string; street?: string; city?: string } | null }>("set-order-status", args);
+          eventCallback(catalogueChangedEvent.dataCreator({ ...idArgs, what: `order ${r.id} → ${r.status}` }));
+          const to = r.shipTo && typeof r.shipTo === "object" ? [r.shipTo.name, r.shipTo.street, r.shipTo.city].filter(Boolean).join(", ") : "";
+          return `Order ${r.id} is now ${r.status}.${to ? ` Ship to: ${to}.` : ""} The customer has been told; nobody else was.`;
+        },
+      },
       [`add_product_${base}`]: {
         description: `Add a product to "${identifier.instanceName}" (owner only).`,
-        parameters: z.object({ name: z.string().min(1).max(80), priceCents: z.number().int().min(0), sku: z.string().max(40).optional() }),
+        parameters: z.object({
+          name: z.string().min(1).max(80),
+          priceCents: z.number().int().min(0),
+          sku: z.string().max(40).optional(),
+          description: z.string().max(2000).optional().describe("What it is, in the shop's own words — the product page is mostly this"),
+          tags: z.array(z.string().min(1).max(24)).max(8).optional().describe('How the storefront groups it: "tea", "gifts", "new"'),
+        }),
         execute: async (args: { name: string }) => {
-          await op("add-product", args);
+          const p = await op<{ tags: string[] }>("add-product", args);
           eventCallback(catalogueChangedEvent.dataCreator({ ...idArgs, what: `added ${args.name}` }));
-          return `Added ${args.name}.`;
+          return `Added ${args.name}${p.tags?.length ? ` under ${p.tags.join(", ")}` : ""}.`;
         },
       },
     };
