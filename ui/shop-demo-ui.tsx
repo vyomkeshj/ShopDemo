@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Apple,
   ArrowLeft,
@@ -185,6 +185,28 @@ const field = "rounded-lg border border-stone-300/70 bg-white/70 px-2 py-1.5 dar
 const chip = "rounded-full border border-stone-300/70 px-2.5 py-1 text-[12px] capitalize hover:bg-stone-100 dark:border-white/15 dark:hover:bg-white/10";
 const chipOn = "rounded-full border border-stone-900 bg-stone-900 px-2.5 py-1 text-[12px] capitalize text-white dark:border-white dark:bg-white dark:text-stone-900";
 
+/**
+ * WHICH BASKET SCREEN — as a pure decision, because the wrong answer is
+ * invisible in a screenshot and obvious in a sentence.
+ *
+ * The rule, learned from a live drive: `signedIn` is the PAGE's guess about
+ * who is here, and on a shared link it can disagree with the session the ops
+ * actually run under. Someone signed in filled a basket, the server took every
+ * line, and the screen offered them the wall. So:
+ *
+ *   · lines in the basket        → the basket, always. The server gave them.
+ *   · the server REFUSED for want of an account → the wall.
+ *   · anything else              → an empty basket, which is a real state.
+ *
+ * The hint never appears here. It may choose WORDS elsewhere; it may not
+ * decide this.
+ */
+export function basketScreen(args: { serverSays: null | "account" | "no-account"; cartLines: number }): "basket" | "wall" | "empty" {
+  if (args.cartLines > 0) return "basket";
+  if (args.serverSays === "no-account") return "wall";
+  return "empty";
+}
+
 /** Where the shopper is. Per-person and per-moment: never an event. */
 type Page = { at: "home" } | { at: "tag"; tag: string } | { at: "product"; id: string } | { at: "cart" } | { at: "orders" };
 
@@ -214,6 +236,44 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
   const [placed, setPlaced] = useState<string | null>(null);
 
   const op = useCallback(<T,>(name: string, args?: unknown) => callPluginOp<T>(PLUGIN_ID, name, nodeId, args), [nodeId]);
+
+  /**
+   * WHETHER THIS PERSON HAS AN ACCOUNT IS THE SERVER'S ANSWER, NOT OURS.
+   *
+   * `viewer.signedIn` is the platform's best guess from the page's own
+   * capabilities, and on a shared link it can disagree with the session the
+   * ops actually run under. Someone signed in on a customer's domain filled a
+   * basket — the server took every line — and this screen still offered them
+   * the wall, because it had asked the wrong oracle (reported 2026-09-12).
+   *
+   * So: every read is ATTEMPTED. A `login-required` refusal is the one honest
+   * signal that there is no account, and it arrives from the same place the
+   * write would. `signedIn` is now only a HINT for wording, never a gate.
+   */
+  const [serverSays, setServerSays] = useState<null | "account" | "no-account">(null);
+  const ask = useCallback(
+    async <T,>(name: string, args?: unknown): Promise<T | null> => {
+      try {
+        const r = await op<T>(name, args);
+        setServerSays("account");
+        return r;
+      } catch (e) {
+        if ((e as { code?: string })?.code === "login-required") {
+          setServerSays("no-account");
+          return null;
+        }
+        throw e;
+      }
+    },
+    [op],
+  );
+  /**
+   * The WORDING may use the platform's hint before the server has answered —
+   * it is usually right and the header should not flicker. The WALL may not:
+   * it waits for a refusal, which is the only thing that knows.
+   */
+  const hasAccount = serverSays ? serverSays === "account" : viewer.signedIn;
+  const refused = serverSays === "no-account";
   const isDesk = viewer.role === "staff" || viewer.role === "owner";
   const isOwner = viewer.role === "owner";
   const shops = !isDesk;
@@ -249,23 +309,31 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
   }, [nodeId, op, dept, query, nextCursor]);
 
   const loadOrders = useCallback(() => {
-    if (!nodeId || !viewer.signedIn) return;
-    op<Order[]>("list-orders").then(setOrders, (e) => setError(String(e?.message ?? e)));
-  }, [nodeId, viewer.signedIn, op]);
+    if (!nodeId) return;
+    // Attempted for everyone: the refusal is what tells us they have no
+    // account, and an empty list is a real answer for someone who has one.
+    ask<Order[]>("list-orders").then(
+      (r) => setOrders(r ?? []),
+      (e) => setError(String(e?.message ?? e)),
+    );
+  }, [nodeId, ask]);
   useEffect(loadOrders, [loadOrders]);
 
   // Who the shop is talking to, for the checkout form. They signed into esoul
   // already; making them type their own name again is a small rudeness.
   const [me, setMe] = useState<{ name: string | null; email: string | null } | null>(null);
   useEffect(() => {
-    if (!nodeId || !viewer.signedIn || isDesk) return;
+    if (!nodeId || isDesk) return;
     op<{ name: string | null; email: string | null }>("me").then(setMe, () => undefined);
-  }, [nodeId, viewer.signedIn, isDesk, op]);
+  }, [nodeId, isDesk, op]);
 
   const loadCart = useCallback(() => {
-    if (!nodeId || !viewer.signedIn || isDesk) return;
-    op<Cart>("view-cart").then(setCart, () => undefined);
-  }, [nodeId, viewer.signedIn, isDesk, op]);
+    if (!nodeId || isDesk) return;
+    ask<Cart>("view-cart").then(
+      (r) => r && setCart(r),
+      () => undefined,
+    );
+  }, [nodeId, isDesk, ask]);
   useEffect(loadCart, [loadCart]);
 
   /**
@@ -280,7 +348,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
     workspaceId: state?.workspaceId ?? "",
     nodeId,
     topics: shopChannel.topicNames,
-    enabled: !!nodeId && viewer.signedIn,
+    enabled: !!nodeId && hasAccount,
   });
   const lastLive = live.latestData;
   useEffect(() => {
@@ -469,7 +537,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
               type="button"
               disabled={busy === p.id}
               onClick={() => addToCart(p)}
-              className={`inline-flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-1.5 text-[12px] font-medium transition disabled:opacity-50 ${
+              className={`inline-flex w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 py-1.5 text-[12px] font-medium leading-none transition disabled:opacity-50 ${
                 have ? `border border-current ${tone.ink} bg-transparent` : tone.pill
               }`}
             >
@@ -480,7 +548,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
               ) : (
                 <ShoppingCart className="h-3.5 w-3.5" aria-hidden />
               )}
-              {have ? `In basket · ${have}` : "Add to basket"}
+              <span className="truncate">{have ? `In basket · ${have}` : "Add to basket"}</span>
             </button>
           </div>
         ) : null}
@@ -522,7 +590,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
                 <ShoppingCart className="h-3.5 w-3.5" aria-hidden /> Basket
                 {cartCount ? <span className="rounded-full bg-stone-900 px-1.5 text-[10px] text-white dark:bg-white dark:text-stone-900">{cartCount}</span> : null}
               </button>
-              {viewer.signedIn ? (
+              {hasAccount ? (
                 <button type="button" onClick={() => setPage({ at: "orders" })} className={`${ghost} inline-flex items-center gap-1.5`}>
                   <ClipboardList className="h-3.5 w-3.5" aria-hidden /> Orders
                 </button>
@@ -531,7 +599,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
           ) : null}
           <span className="rounded-full border border-stone-300/70 px-2.5 py-1 text-[11px] text-stone-500 dark:border-white/15 dark:text-stone-400">
             you are: <span className="font-medium text-stone-700 dark:text-stone-200">{viewer.role}</span>
-            {!viewer.signedIn ? " · not signed in" : ""}
+            {!hasAccount ? " · not signed in" : ""}
           </span>
         </nav>
       </header>
@@ -829,7 +897,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
                   )}
                   {shops ? (
                     <div className="mt-1 flex flex-wrap items-center gap-2">
-                      <button type="button" disabled={busy === detail.id} onClick={() => addToCart(detail)} className={`${solid} inline-flex items-center gap-1.5`}>
+                      <button type="button" disabled={busy === detail.id} onClick={() => addToCart(detail)} className={`${solid} inline-flex items-center gap-1.5 whitespace-nowrap`}>
                         {busy === detail.id ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <ShoppingCart className="h-4 w-4" aria-hidden />} Add to basket
                       </button>
                       {inCart(detail.id) ? (
@@ -855,9 +923,19 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
             <h2 className="flex items-center gap-1.5 text-lg font-semibold tracking-tight">
               <ShoppingCart className="h-4 w-4 text-stone-400" aria-hidden /> Your basket
             </h2>
-            {!viewer.signedIn ? (
-              <p className="text-stone-500">Sign in and your basket follows you.</p>
-            ) : !cart || cart.lines.length === 0 ? (
+            {/* The basket, if there is one. The wall appears only when the
+                SERVER said there is no account — never because this page
+                thought so while holding two things. */}
+            {basketScreen({ serverSays, cartLines: cart?.lines.length ?? 0 }) === "wall" ? (
+              <div className={`flex flex-col items-center gap-2 rounded-2xl bg-white/60 px-6 py-10 text-center ring-1 ${accent.ring} dark:bg-white/[0.03]`}>
+                <EmptyBasketArt className={`h-24 w-24 ${accent.soft}`} />
+                <p className="text-[13px] font-medium">Sign in and your basket follows you</p>
+                <p className="max-w-xs text-[11.5px] leading-4 text-stone-500 dark:text-stone-400">On every device, with your orders beside it.</p>
+                <button type="button" onClick={wall.signIn} className={`mt-1 inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[12px] font-medium ${accent.pill}`}>
+                  <LogIn className="h-3.5 w-3.5" aria-hidden /> Sign in
+                </button>
+              </div>
+            ) : basketScreen({ serverSays, cartLines: cart?.lines.length ?? 0 }) === "empty" ? (
               <div className={`flex flex-col items-center gap-2 rounded-2xl bg-white/60 px-6 py-10 text-center ring-1 ${accent.ring} dark:bg-white/[0.03]`}>
                 <EmptyBasketArt className={`h-24 w-24 ${accent.soft}`} />
                 <p className="text-[13px] font-medium">Nothing in it yet</p>

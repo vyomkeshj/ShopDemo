@@ -131,3 +131,30 @@ describe("the picture a product gets", () => {
     expect(name("Zarf", "ZZZ-9")).not.toBe("");
   });
 });
+
+/**
+ * THE ORACLE IS THE SERVER.
+ *
+ * A signed-in person filled a basket on a shared link — the server took every
+ * line — and the screen still offered them the wall, because it asked
+ * `viewer.signedIn`, which is the PAGE's guess about identity and can disagree
+ * with the session the ops run under (live drive, 2026-09-12). The decision is
+ * a function now, so the rule can be stated rather than screenshotted.
+ */
+describe("which basket screen", () => {
+  const { basketScreen } = require("./ui/shop-demo-ui") as {
+    basketScreen: (a: { serverSays: null | "account" | "no-account"; cartLines: number }) => string;
+  };
+
+  it("THE BUG: lines in the basket are never behind a wall, whatever anyone thinks of the viewer", () => {
+    expect(basketScreen({ serverSays: "no-account", cartLines: 2 })).toBe("basket");
+    expect(basketScreen({ serverSays: null, cartLines: 2 })).toBe("basket");
+    expect(basketScreen({ serverSays: "account", cartLines: 2 })).toBe("basket");
+  });
+
+  it("the wall needs a REFUSAL — not a hunch, and not silence", () => {
+    expect(basketScreen({ serverSays: "no-account", cartLines: 0 })).toBe("wall");
+    expect(basketScreen({ serverSays: null, cartLines: 0 })).toBe("empty");
+    expect(basketScreen({ serverSays: "account", cartLines: 0 })).toBe("empty");
+  });
+});
