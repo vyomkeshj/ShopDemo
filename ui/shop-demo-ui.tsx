@@ -20,6 +20,7 @@ import {
   PackageCheck,
   Plus,
   RotateCcw,
+  Search,
   Shirt,
   ShoppingBag,
   ShoppingCart,
@@ -163,6 +164,9 @@ const solid = "rounded-lg bg-stone-900 px-3 py-1.5 text-white disabled:opacity-5
 const ghost = "rounded-lg border border-stone-400/60 px-2.5 py-1 text-[12px] hover:bg-stone-100 disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/10";
 const stepper = "grid h-7 w-7 place-items-center rounded-md border border-stone-400/60 hover:bg-stone-100 disabled:opacity-40 dark:border-white/20 dark:hover:bg-white/10";
 const field = "rounded-lg border border-stone-300/70 bg-white/70 px-2 py-1.5 dark:border-white/15 dark:bg-white/5";
+/** A department, offered and chosen. The chosen one is a filled pill. */
+const chip = "rounded-full border border-stone-300/70 px-2.5 py-1 text-[12px] capitalize hover:bg-stone-100 dark:border-white/15 dark:hover:bg-white/10";
+const chipOn = "rounded-full border border-stone-900 bg-stone-900 px-2.5 py-1 text-[12px] capitalize text-white dark:border-white dark:bg-white dark:text-stone-900";
 
 /** Where the shopper is. Per-person and per-moment: never an event. */
 type Page = { at: "home" } | { at: "tag"; tag: string } | { at: "product"; id: string } | { at: "cart" } | { at: "orders" };
@@ -176,6 +180,15 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
 
   const [page, setPage] = useState<Page>({ at: "home" });
   const [products, setProducts] = useState<Product[] | null>(null);
+  // WHAT THE SHOPPER IS LOOKING AT: one department, one search term, and how
+  // far down the shelf they have walked. All three are the SERVER's questions
+  // now — with a big catalogue, a department the browser filters for is a
+  // department that looks empty.
+  const [dept, setDept] = useState<string | null>(null);
+  const [term, setTerm] = useState("");
+  const [query, setQuery] = useState("");
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
   const [detail, setDetail] = useState<Product | null>(null);
   const [cart, setCart] = useState<Cart | null>(null);
   const [orders, setOrders] = useState<Order[] | null>(null);
@@ -188,11 +201,35 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
   const isOwner = viewer.role === "owner";
   const shops = !isDesk;
 
+  type Shelf = { items: Product[]; nextCursor: string | null };
   const loadProducts = useCallback(() => {
     if (!nodeId) return;
-    op<Product[]>("browse").then(setProducts, (e) => setError(String(e?.message ?? e)));
-  }, [nodeId, op]);
+    setProducts(null);
+    setNextCursor(null);
+    op<Shelf>("browse", { ...(dept ? { tag: dept } : {}), ...(query ? { q: query } : {}) }).then(
+      (r) => {
+        setProducts(r.items);
+        setNextCursor(r.nextCursor);
+      },
+      (e) => setError(String(e?.message ?? e)),
+    );
+  }, [nodeId, op, dept, query]);
   useEffect(loadProducts, [loadProducts, state?.catalogueVersion]);
+
+  /** The next page, appended — the shelf continues rather than starting again. */
+  const loadMore = useCallback(() => {
+    if (!nodeId || !nextCursor) return;
+    setMore(true);
+    op<Shelf>("browse", { ...(dept ? { tag: dept } : {}), ...(query ? { q: query } : {}), cursor: nextCursor })
+      .then(
+        (r) => {
+          setProducts((prev) => [...(prev ?? []), ...r.items]);
+          setNextCursor(r.nextCursor);
+        },
+        (e) => setError(String(e?.message ?? e)),
+      )
+      .finally(() => setMore(false));
+  }, [nodeId, op, dept, query, nextCursor]);
 
   const loadOrders = useCallback(() => {
     if (!nodeId || !viewer.signedIn) return;
@@ -245,12 +282,20 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
     op<Product>("product", { productId: pageKey }).then(setDetail, (e) => setError(String(e?.message ?? e)));
   }, [pageKey, op]);
 
+  // THE DEPARTMENTS COME FROM THE FOLD, not from whatever arrived on this
+  // page. A storefront has to offer every department it has, and a page of 24
+  // products out of 100 000 knows almost none of them.
+  const departments = useMemo(() => [...(state?.departments ?? [])], [state?.departments]);
+  // Sections only when nobody narrowed anything: a chosen department or a
+  // search term is already one answer, and grouping it again would be noise.
   const sections = useMemo(() => {
+    if (dept || query) return [];
     const byTag = new Map<string, Product[]>();
     for (const p of products ?? []) for (const t of p.tags ?? []) byTag.set(t, [...(byTag.get(t) ?? []), p]);
     return [...byTag.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-  }, [products]);
-  const untagged = useMemo(() => (products ?? []).filter((p) => !p.tags?.length), [products]);
+  }, [products, dept, query]);
+  const untagged = useMemo(() => (dept || query ? [] : (products ?? []).filter((p) => !p.tags?.length)), [products, dept, query]);
+  const narrowed = useMemo(() => (dept || query ? (products ?? []) : []), [products, dept, query]);
   const cartCount = useMemo(() => (cart?.lines ?? []).reduce((n, l) => n + l.qty, 0), [cart]);
   const inCart = useCallback((id: string) => (cart?.lines ?? []).find((l) => l.productId === id)?.qty ?? 0, [cart]);
 
@@ -319,6 +364,12 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
           applicationId: state.nodeId,
           instanceName: state.instanceName,
           what: `added ${name}`,
+          // The departments this product introduced, so the storefront can
+          // offer them without asking the catalogue what its departments are.
+          tags: String(form.get("tags") ?? "")
+            .split(",")
+            .map((t) => t.trim().toLowerCase())
+            .filter(Boolean),
         }),
       );
       loadProducts();
@@ -435,6 +486,64 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
               <Store className="h-16 w-16 shrink-0 text-stone-300 dark:text-white/15" aria-hidden />
             </section>
 
+            {/* FINDING THINGS. Both of these are questions for the server: with
+                a big catalogue, a department the browser filters for is a
+                department that looks empty. */}
+            <section className="flex flex-col gap-3">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setQuery(term.trim());
+                }}
+                className="flex gap-2"
+              >
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-stone-400" aria-hidden />
+                  <input
+                    value={term}
+                    onChange={(e) => setTerm(e.target.value)}
+                    placeholder="Search the shop"
+                    aria-label="Search the shop"
+                    className={`${field} pl-9`}
+                  />
+                </div>
+                <button type="submit" className={solid}>
+                  Search
+                </button>
+                {query ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTerm("");
+                      setQuery("");
+                    }}
+                    className={ghost}
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </form>
+              {departments.length ? (
+                <div className="flex flex-wrap gap-1.5">
+                  <button type="button" onClick={() => setDept(null)} className={dept === null ? chipOn : chip}>
+                    Everything
+                  </button>
+                  {departments.map((t) => (
+                    <button key={t} type="button" onClick={() => setDept(t === dept ? null : t)} className={t === dept ? chipOn : chip}>
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {dept || query ? (
+                <p className="text-[12px] text-stone-500 dark:text-stone-400">
+                  {dept ? `In ${dept}` : "Everything"}
+                  {query ? ` matching “${query}”` : ""}
+                  {products ? ` — ${products.length}${nextCursor ? "+" : ""} found` : ""}
+                </p>
+              ) : null}
+            </section>
+
             {products === null ? (
               <p className="text-stone-500">Setting out the shelves…</p>
             ) : products.length === 0 ? (
@@ -444,6 +553,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
               </div>
             ) : (
               <>
+                {narrowed.length ? <Grid items={narrowed} /> : null}
                 {sections.map(([tag, items]) => (
                   <section key={tag}>
                     <div className="mb-2 flex items-baseline justify-between">
@@ -467,6 +577,14 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
                     <Grid items={untagged} />
                   </section>
                 ) : null}
+                {/* The shelf continues. One more page, appended — never a
+                    restart, and never a button that leads nowhere, because
+                    `browse` asked for one more than it showed. */}
+                {nextCursor ? (
+                  <button type="button" onClick={loadMore} disabled={more} className={`${ghost} mx-auto`}>
+                    {more ? "Fetching…" : "Show more"}
+                  </button>
+                ) : null}
               </>
             )}
           </>
@@ -479,7 +597,13 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
             <h2 className="flex items-center gap-1.5 text-lg font-semibold tracking-tight">
               <Tag className="h-4 w-4 text-stone-400" aria-hidden /> {page.tag}
             </h2>
-            <Grid items={(products ?? []).filter((p) => p.tags?.includes(page.tag))} />
+            {/* The server already answered this question — see `dept` above. */}
+            <Grid items={products ?? []} />
+            {nextCursor ? (
+              <button type="button" onClick={loadMore} disabled={more} className={`${ghost} mx-auto`}>
+                {more ? "Fetching…" : "Show more"}
+              </button>
+            ) : null}
           </section>
         ) : null}
 

@@ -32,11 +32,56 @@ const ProductInput = z.object({
   tags: z.array(z.string().min(1).max(24)).max(8).optional(),
 });
 
-/** Anyone on the link: the live catalogue. `read: anyone` in the manifest. */
+const BrowseInput = z.object({
+  /** One department, as the storefront's chips offer it. */
+  tag: z.string().min(1).max(24).optional(),
+  /** What the shopper typed. */
+  q: z.string().min(1).max(60).optional(),
+  /** The id of the last product on the previous page. */
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(48).optional(),
+});
+
+const PAGE = 24;
+
+/**
+ * THE SHELVES, ONE PAGE AT A TIME.
+ *
+ * A department and a search term are a WHERE, not a filter the browser applies
+ * to whatever arrived. That is the whole difference between a catalogue and a
+ * list: with 100 000 products, "gifts" has to find the gifts, not look for
+ * them among the first page. Both questions are index lookups because
+ * `plugin.json` declares the kinds for them (`tags` → `contains`, `name` →
+ * `text`), and the page walks by CURSOR so the hundredth page costs what the
+ * first one did.
+ *
+ * `read: anyone` in the manifest, so a stranger on the link reaches it.
+ */
 async function browse(ctx: PluginOpContext) {
+  const { tag, q, cursor, limit } = BrowseInput.parse(ctx.args ?? {});
   const d = await db(ctx);
-  const rows = await d.product.findMany({ where: { active: true }, orderBy: { createdAt: "asc" }, take: 200 });
-  return rows.map((p) => ({ id: p.id, name: p.name, priceCents: p.priceCents, sku: p.sku, tags: p.tags ?? [], description: p.description }));
+  const take = limit ?? PAGE;
+  const rows = await d.product.findMany({
+    where: {
+      active: true,
+      ...(tag ? { tags: { has: tag.trim().toLowerCase() } } : {}),
+      ...(q ? { name: { contains: q.trim() } } : {}),
+    },
+    orderBy: { createdAt: "asc" },
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor } } : {}),
+  });
+  // One more than asked for, so "is there another page" is an answer rather
+  // than a guess the shopper discovers by pressing More and getting nothing.
+  const items = rows.slice(0, take).map((p) => ({
+    id: p.id,
+    name: p.name,
+    priceCents: p.priceCents,
+    sku: p.sku,
+    tags: p.tags ?? [],
+    description: p.description,
+  }));
+  return { items, nextCursor: rows.length > take ? (items[items.length - 1]?.id ?? null) : null };
 }
 
 /** The owner: a product. The rule (`write: ["owner"]`) refuses everyone else. */

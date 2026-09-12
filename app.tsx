@@ -60,6 +60,15 @@ export interface ShopDelivery {
 export interface ShopDemoData extends ApplicationIdentifier, BindingHolder {
   /** Bumped whenever the catalogue changes, so every open UI refetches it. */
   catalogueVersion: number;
+  /**
+   * THE DEPARTMENTS, in the fold on purpose. A storefront has to offer every
+   * department, and with 100 000 products it cannot learn them from a page of
+   * results — `SELECT DISTINCT` over a catalogue is the scan the tables exist
+   * to avoid. A shop's department list is small, shared, and worth scrubbing,
+   * which is exactly what the fold is for; the products themselves stay in the
+   * table where they belong.
+   */
+  departments: string[];
   /** Staff notes to customers ("closed on Monday"). Small, shared, scrubbable. */
   announcements: ShopAnnouncement[];
   /**
@@ -72,6 +81,7 @@ export interface ShopDemoData extends ApplicationIdentifier, BindingHolder {
 }
 
 const MAX_ANNOUNCEMENTS = 20;
+const MAX_DEPARTMENTS = 60;
 
 const envelope = (eventName: string, args: Record<string, any>, eventData: unknown): EventData<any> => ({
   eventName,
@@ -96,6 +106,9 @@ export const catalogueChangedEvent: EventDefinition<ShopDemoData> = {
     envelope("plugin_shop_demo_catalogue_changed", args, {
       changeId: args.changeId ?? nanoid(),
       what: typeof args.what === "string" ? args.what : "catalogue",
+      // The departments this change introduced, so the storefront can offer
+      // them without asking the catalogue what its departments are.
+      tags: Array.isArray(args.tags) ? args.tags.filter((t: unknown) => typeof t === "string") : [],
       at: args.at ?? Date.now(),
     }),
   processor: (state, event) => {
@@ -105,7 +118,17 @@ export const catalogueChangedEvent: EventDefinition<ShopDemoData> = {
     // applied id so a retried dispatch cannot bump twice.
     const seen = (state as ShopDemoData & { _lastChangeId?: string })._lastChangeId;
     if (seen === d.changeId) return state;
-    return { ...state, catalogueVersion: (state.catalogueVersion ?? 0) + 1, _lastChangeId: d.changeId } as ShopDemoData;
+    // Departments accumulate, sorted, never duplicated — a set kept in the
+    // order a person reads. Capped, because a fold is not a place for
+    // unbounded growth and a shop with 200 departments has a different problem.
+    const incoming = Array.isArray(d.tags) ? (d.tags as unknown[]).filter((t): t is string => typeof t === "string") : [];
+    const departments = [...new Set([...(state.departments ?? []), ...incoming])].sort().slice(0, MAX_DEPARTMENTS);
+    return {
+      ...state,
+      catalogueVersion: (state.catalogueVersion ?? 0) + 1,
+      departments,
+      _lastChangeId: d.changeId,
+    } as ShopDemoData;
   },
 };
 
@@ -192,11 +215,14 @@ export function describeCart(cart: Cart, shopName: string): string {
   return `${lines.join("\n")}\nTotal ${(cart.totalCents / 100).toFixed(2)}.`;
 }
 
-export function describeShop(s: Pick<ShopDemoData, "instanceName" | "catalogueVersion" | "announcements">): string {
+export function describeShop(s: Pick<ShopDemoData, "instanceName" | "catalogueVersion" | "announcements" | "departments">): string {
   const n = s.announcements?.length ?? 0;
+  const depts = s.departments ?? [];
   return (
     `Shop "${s.instanceName}": catalogue version ${s.catalogueVersion ?? 0}, ${n} announcement${n === 1 ? "" : "s"}. ` +
-    `Products and orders live in the app's own tables — use browse_shop / list_orders; a customer's list is theirs alone.`
+    (depts.length ? `Departments: ${depts.join(", ")}. ` : "No departments yet. ") +
+    `Products and orders live in the app's own tables — use browse_shop (narrow it by department or search term; it pages) ` +
+    `and list_orders; a customer's list is theirs alone.`
   );
 }
 
@@ -307,7 +333,7 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
   reconstructStateFromEventLog: true,
   events: [catalogueChangedEvent, announcedEvent, toldCustomerEvent, bindingSetEvent as never],
   getPorts: (): ApplicationPort[] => [],
-  stateCreator: (identifier) => ({ ...identifier, catalogueVersion: 0, announcements: [], deliveries: [] }),
+  stateCreator: (identifier) => ({ ...identifier, catalogueVersion: 0, departments: [], announcements: [], deliveries: [] }),
 
   getStateDescription: (state: ShopDemoData) => {
     const notice = incompleteStateNotice({
@@ -328,14 +354,31 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
     };
     const tools: Record<string, any> = {
       [`browse_shop_${base}`]: {
-        description: `List the products of the shop "${identifier.instanceName}" (name, price in cents, id).`,
-        parameters: z.object({}),
+        // An agent shopping a large catalogue needs the same two questions the
+        // storefront asks, and the same paging: "the tea ones", "anything with
+        // grey in the name", "the next twenty-four".
+        description:
+          `List the products of the shop "${identifier.instanceName}" (name, price in cents, id). ` +
+          `Narrow it with a department and/or a search term rather than asking for everything; ` +
+          `pass \`after\` with the last id to see the next page.`,
+        parameters: z.object({
+          tag: z.string().optional().describe('One department, e.g. "tea" — the shop lists them in its state'),
+          q: z.string().optional().describe("Part of a product name"),
+          after: z.string().optional().describe("The last product id of the previous page"),
+        }),
         readOnly: true,
         publicSafe: true,
-        execute: async () => {
-          const products = await op<{ id: string; name: string; priceCents: number }[]>("browse");
-          if (!products.length) return `The shop "${identifier.instanceName}" has no products yet.`;
-          return products.map((p) => `${p.name} — ${(p.priceCents / 100).toFixed(2)} (id ${p.id})`).join("\n");
+        execute: async (a: { tag?: string; q?: string; after?: string }) => {
+          const page = await op<{ items: { id: string; name: string; priceCents: number }[]; nextCursor: string | null }>("browse", {
+            ...(a?.tag ? { tag: a.tag } : {}),
+            ...(a?.q ? { q: a.q } : {}),
+            ...(a?.after ? { cursor: a.after } : {}),
+          });
+          const asked = [a?.tag && `in ${a.tag}`, a?.q && `matching "${a.q}"`].filter(Boolean).join(" ");
+          if (!page.items.length) return `Nothing ${asked || "on the shelves"} at "${identifier.instanceName}".`;
+          const lines = page.items.map((p) => `${p.name} — ${(p.priceCents / 100).toFixed(2)} (id ${p.id})`);
+          if (page.nextCursor) lines.push(`… more: browse again with after: "${page.nextCursor}"`);
+          return lines.join("\n");
         },
       },
       [`product_detail_${base}`]: {
