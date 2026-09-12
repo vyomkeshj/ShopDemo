@@ -467,6 +467,46 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
           return orders.map((o) => `${o.id} · ${o.status} · ${(o.totalCents / 100).toFixed(2)} · ${o.createdAt}`).join("\n");
         },
       },
+      /**
+       * THE TILL. Every thing sold is a row carrying the price at the time, so
+       * this is index work rather than a walk over every order — and it says
+       * the date it can see back to, because an order placed before 0.6.0 has
+       * a receipt and no rows. Staff and the owner get the shop's; a customer
+       * gets their own, which is a perfectly good answer to "what did I buy".
+       */
+      [`sales_${base}`]: {
+        description:
+          `What "${identifier.instanceName}" sold: money and units per product. ` +
+          `Narrow it with productId or since (a date); it pages with cursor, and totals only the page it read.`,
+        parameters: z.object({
+          productId: z.string().optional(),
+          since: z.string().optional(),
+          cursor: z.string().optional(),
+          limit: z.number().int().min(1).max(100).optional(),
+        }),
+        readOnly: true,
+        execute: async (args: unknown) => {
+          const r = await op<{
+            products: { name: string; units: number; centsSold: number }[];
+            unitsSold: number;
+            centsSold: number;
+            nextCursor: string | null;
+            countsSalesFrom: string | null;
+          }>("sales", args);
+          if (!r.products.length) {
+            return r.countsSalesFrom
+              ? `Nothing sold in that window. Sales are counted from ${r.countsSalesFrom}.`
+              : "Nothing sold yet.";
+          }
+          const lines = r.products.map((p) => `${p.name} · ${p.units} sold · ${(p.centsSold / 100).toFixed(2)}`);
+          return (
+            `${r.unitsSold} item${r.unitsSold === 1 ? "" : "s"}, ${(r.centsSold / 100).toFixed(2)} total\n` +
+            lines.join("\n") +
+            (r.nextCursor ? `\nMore: cursor ${r.nextCursor}` : "") +
+            (r.countsSalesFrom ? `\nCounted from ${r.countsSalesFrom}.` : "")
+          );
+        },
+      },
       [`set_order_status_${base}`]: {
         description: `Move an order of "${identifier.instanceName}" along: new → preparing → shipped → fulfilled, or refunded. Staff and the owner only. Returns the address to ship to, so the next thing said can be the label.`,
         parameters: z.object({

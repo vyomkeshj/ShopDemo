@@ -159,6 +159,12 @@ describe("only a catalogue change is a catalogue change", () => {
     return { tools, dispatched };
   };
 
+  it("the till is askable — a table nobody can query is not a capability", () => {
+    const { tools } = toolkit();
+    const sales = Object.keys(tools).find((n) => n.startsWith("sales_"));
+    expect(sales).toBeTruthy();
+  });
+
   it("no tool dispatches an event of its own — the op owns the timeline", () => {
     const { tools, dispatched } = toolkit();
     expect(Object.keys(tools).length).toBeGreaterThan(5);
