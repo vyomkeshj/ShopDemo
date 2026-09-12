@@ -229,9 +229,23 @@ async function setCartQty(ctx: PluginOpContext) {
  * the CALLER — there is no argument for whose profile to read.
  */
 async function me(ctx: PluginOpContext) {
-  const { viewerProfile } = await import("esoul-sdk/server");
-  const who = await viewerProfile(ctx.viewer);
+  const who = await whoIsThis(ctx);
   return { name: who?.name ?? null, email: who?.email ?? null };
+}
+
+/**
+ * The caller's account, or null — never a throw. A profile read that fails
+ * (the platform's database blinking, a test with no database at all) must
+ * not stop a person from buying: the name is a courtesy, the order is the
+ * point.
+ */
+async function whoIsThis(ctx: PluginOpContext): Promise<{ name: string | null; email: string | null } | null> {
+  try {
+    const { viewerProfile } = await import("esoul-sdk/server");
+    return await viewerProfile(ctx.viewer);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -245,8 +259,7 @@ async function checkout(ctx: PluginOpContext) {
   // customer: they signed into esoul already, so making them type their name
   // again is a small rudeness, and a receipt needs somewhere to go. One read,
   // here, at the one moment it matters — not on every page.
-  const { viewerProfile } = await import("esoul-sdk/server");
-  const who = await viewerProfile(ctx.viewer);
+  const who = await whoIsThis(ctx);
   const d = await db(ctx);
   const cart = await viewCart(ctx);
   if (!cart.lines.length) throw new Error("your basket is empty");
