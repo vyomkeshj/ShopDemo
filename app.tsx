@@ -28,7 +28,9 @@ import {
   type ApplicationSchema,
   type EventData,
   type EventDefinition,
+  opTool,
 } from "esoul-sdk";
+import { ops } from "./ops";
 import { ShopDemoUi } from "./ui/shop-demo-ui";
 
 export const PLUGIN_ID = "shop-demo";
@@ -408,124 +410,94 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
   // and the op records anything that belongs on the timeline (`ctx.emit`). A
   // tool that also dispatched its own event double-recorded it, with a random
   // id the reducer could not dedupe (2026-09-12).
-  toolkitCreator: (identifier, forChatId, _eventCallback) => {
+  toolkitCreator: (identifier, _forChatId, _eventCallback) => {
     const base = identifier.instanceName.replace(/[^a-zA-Z0-9]/g, "_");
-    const idArgs = { ...identifier, applicationId: identifier.nodeId, chatIdSource: forChatId };
-    const op = async <T,>(name: string, args?: unknown): Promise<T> => {
-      const { callPluginOp } = await import("esoul-sdk");
-      return callPluginOp<T>(PLUGIN_ID, name, identifier.nodeId, args);
-    };
+    const shop = identifier.instanceName;
+    const money = (cents: number) => (cents / 100).toFixed(2);
+    // EVERY TOOL IS DERIVED FROM ITS OP (`opTool`, ./ops.ts): the parameters the
+    // model sees ARE the input the op parses, so a field the op takes can never
+    // be missing from the tool. The day the two were written separately, this
+    // shop's add_product answered "Added Earl Grey" over a product whose picture
+    // it had silently dropped — zod strips what a schema does not name.
     const tools: Record<string, any> = {
-      [`browse_shop_${base}`]: {
-        // An agent shopping a large catalogue needs the same two questions the
-        // storefront asks, and the same paging: "the tea ones", "anything with
-        // grey in the name", "the next twenty-four".
+      // An agent shopping a large catalogue needs the same two questions the
+      // storefront asks, and the same paging: "the tea ones", "anything with
+      // grey in the name", "the next twenty-four".
+      [`browse_shop_${base}`]: opTool(ops, "browse", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
         description:
-          `List the products of the shop "${identifier.instanceName}" (name, price in cents, id). ` +
+          `List the products of the shop "${shop}" (name, price in cents, id). ` +
           `Narrow it with a department and/or a search term rather than asking for everything; ` +
-          `pass \`after\` with the last id to see the next page.`,
-        parameters: z.object({
-          tag: z.string().optional().describe('One department, e.g. "tea" — the shop lists them in its state'),
-          q: z.string().optional().describe("Part of a product name"),
-          after: z.string().optional().describe("The last product id of the previous page"),
-        }),
+          `pass \`cursor\` with the last id to see the next page.`,
         readOnly: true,
         publicSafe: true,
-        execute: async (a: { tag?: string; q?: string; after?: string }) => {
-          const page = await op<{ items: { id: string; name: string; priceCents: number }[]; nextCursor: string | null }>("browse", {
-            ...(a?.tag ? { tag: a.tag } : {}),
-            ...(a?.q ? { q: a.q } : {}),
-            ...(a?.after ? { cursor: a.after } : {}),
-          });
+        say: (page: { items: { id: string; name: string; priceCents: number }[]; nextCursor: string | null }, a) => {
           const asked = [a?.tag && `in ${a.tag}`, a?.q && `matching "${a.q}"`].filter(Boolean).join(" ");
-          if (!page.items.length) return `Nothing ${asked || "on the shelves"} at "${identifier.instanceName}".`;
-          const lines = page.items.map((p) => `${p.name} — ${(p.priceCents / 100).toFixed(2)} (id ${p.id})`);
-          if (page.nextCursor) lines.push(`… more: browse again with after: "${page.nextCursor}"`);
+          if (!page.items.length) return `Nothing ${asked || "on the shelves"} at "${shop}".`;
+          const lines = page.items.map((p) => `${p.name} — ${money(p.priceCents)} (id ${p.id})`);
+          if (page.nextCursor) lines.push(`… more: browse again with cursor: "${page.nextCursor}"`);
           return lines.join("\n");
         },
-      },
-      [`product_detail_${base}`]: {
-        description: `Everything "${identifier.instanceName}" says about one product: what it is, what it costs, and how it is filed.`,
-        parameters: z.object({ productId: z.string().describe("The product id, as browse_shop shows it") }),
+      }),
+      [`product_detail_${base}`]: opTool(ops, "product", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Everything "${shop}" says about one product: what it is, what it costs, and how it is filed.`,
         readOnly: true,
         publicSafe: true,
-        execute: async (args: { productId: string }) => {
-          const p = await op<{ name: string; priceCents: number; sku: string | null; description: string | null; tags: string[] }>("product", args);
-          return [
-            `${p.name} — ${(p.priceCents / 100).toFixed(2)}`,
-            p.sku ? `stock code ${p.sku}` : null,
-            p.tags?.length ? `filed under ${p.tags.join(", ")}` : null,
-            p.description ?? "No description yet.",
-          ]
+        say: (p: { name: string; priceCents: number; sku: string | null; description: string | null; tags: string[] }) =>
+          [`${p.name} — ${money(p.priceCents)}`, p.sku ? `stock code ${p.sku}` : null, p.tags?.length ? `filed under ${p.tags.join(", ")}` : null, p.description ?? "No description yet."]
             .filter(Boolean)
-            .join("\n");
-        },
-      },
+            .join("\n"),
+      }),
       // THE BASKET, as an agent works it. A person says "add two of the Earl
       // Grey, actually make it three, now check out" and these are the three
       // calls — each returning the WHOLE basket, so the answer the agent reads
       // back is the state the screen shows.
-      [`add_to_cart_${base}`]: {
-        description: `Put a product in the caller's own basket at "${identifier.instanceName}" (adds to what is already there). Returns the whole basket.`,
-        parameters: z.object({ productId: z.string(), qty: z.number().int().min(1).max(99).optional() }),
-        execute: async (args: { productId: string; qty?: number }) => {
-          const cart = await op<Cart>("add-to-cart", args);
-          return describeCart(cart, identifier.instanceName);
-        },
-      },
-      [`view_cart_${base}`]: {
-        description: `What is in the caller's own basket at "${identifier.instanceName}", and what it comes to.`,
-        parameters: z.object({}),
+      [`add_to_cart_${base}`]: opTool(ops, "add-to-cart", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Put a product in the caller's own basket at "${shop}" (adds to what is already there). Returns the whole basket.`,
+        say: (cart: Cart) => describeCart(cart, shop),
+      }),
+      [`view_cart_${base}`]: opTool(ops, "view-cart", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `What is in the caller's own basket at "${shop}", and what it comes to.`,
         readOnly: true,
-        execute: async () => describeCart(await op<Cart>("view-cart"), identifier.instanceName),
-      },
-      [`set_cart_quantity_${base}`]: {
-        description: `Change how many of one product are in the caller's basket at "${identifier.instanceName}". Zero takes it out.`,
-        parameters: z.object({ productId: z.string(), qty: z.number().int().min(0).max(99) }),
-        execute: async (args: { productId: string; qty: number }) => {
-          const cart = await op<Cart>("set-cart-qty", args);
-          return describeCart(cart, identifier.instanceName);
-        },
-      },
-      [`checkout_${base}`]: {
-        description: `Buy what is in the caller's basket at "${identifier.instanceName}". Needs a name and an address; the shop prices it from the catalogue, not from the basket.`,
-        parameters: z.object({
-          shipTo: z.object({ name: z.string(), street: z.string(), city: z.string() }),
-          note: z.string().max(280).optional(),
-        }),
-        execute: async (args: unknown) => {
-          const r = await op<{ orderId: string; totalCents: number }>("checkout", args);
-          // NOT a catalogue change. This used to bump `catalogueVersion`, which
-          // is what every open storefront watches to re-read the shelves — so
-          // at a thousand orders a day every shopper's page would refetch the
-          // catalogue a thousand times for something that did not touch it.
-          // The desk and the customer learn through the channel's own topics
-          // (`new-order`, `order-status`), which is what those are for.
-          return `Order ${r.orderId} placed — ${(r.totalCents / 100).toFixed(2)}. The basket is empty again.`;
-        },
-      },
-      [`place_order_${base}`]: {
-        description: `Place an order in "${identifier.instanceName}" for the CALLER (they must be signed in). Lines are product ids and quantities; the server prices them.`,
-        parameters: z.object({
-          lines: z.array(z.object({ productId: z.string(), qty: z.number().int().min(1).max(99) })).min(1),
-          shipTo: z.object({ name: z.string(), street: z.string(), city: z.string() }),
-          note: z.string().max(280).optional(),
-        }),
-        execute: async (args: unknown) => {
-          const r = await op<{ orderId: string; totalCents: number }>("place-order", args);
-          return `Order ${r.orderId} placed — total ${(r.totalCents / 100).toFixed(2)}.`;
-        },
-      },
-      [`list_orders_${base}`]: {
-        description: `The orders of "${identifier.instanceName}" this caller may see: a customer's own; every order for staff and the owner.`,
-        parameters: z.object({}),
+        say: (cart: Cart) => describeCart(cart, shop),
+      }),
+      [`set_cart_quantity_${base}`]: opTool(ops, "set-cart-qty", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Change how many of one product are in the caller's basket at "${shop}". Zero takes it out.`,
+        say: (cart: Cart) => describeCart(cart, shop),
+      }),
+      // NOT a catalogue change: bumping `catalogueVersion` here made every open
+      // storefront refetch the shelves once per order. The desk and the
+      // customer learn through the channel's own topics (`new-order`,
+      // `order-status`), which is what those are for.
+      [`checkout_${base}`]: opTool(ops, "checkout", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Buy what is in the caller's basket at "${shop}". Needs a name and an address; the shop prices it from the catalogue, not from the basket.`,
+        say: (r: { orderId: string; totalCents: number }) => `Order ${r.orderId} placed — ${money(r.totalCents)}. The basket is empty again.`,
+      }),
+      [`place_order_${base}`]: opTool(ops, "place-order", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Place an order in "${shop}" for the CALLER (they must be signed in). Lines are product ids and quantities; the server prices them.`,
+        say: (r: { orderId: string; totalCents: number }) => `Order ${r.orderId} placed — total ${money(r.totalCents)}.`,
+      }),
+      [`list_orders_${base}`]: opTool(ops, "list-orders", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `The orders of "${shop}" this caller may see: a customer's own; every order for staff and the owner.`,
         readOnly: true,
-        execute: async () => {
-          const orders = await op<{ id: string; status: string; totalCents: number; createdAt: string }[]>("list-orders");
-          if (!orders.length) return "No orders.";
-          return orders.map((o) => `${o.id} · ${o.status} · ${(o.totalCents / 100).toFixed(2)} · ${o.createdAt}`).join("\n");
-        },
-      },
+        say: (orders: { id: string; status: string; totalCents: number; createdAt: string }[]) =>
+          orders.length ? orders.map((o) => `${o.id} · ${o.status} · ${money(o.totalCents)} · ${o.createdAt}`).join("\n") : "No orders.",
+      }),
       /**
        * THE TILL. Every thing sold is a row carrying the price at the time, so
        * this is index work rather than a walk over every order — and it says
@@ -533,149 +505,96 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
        * a receipt and no rows. Staff and the owner get the shop's; a customer
        * gets their own, which is a perfectly good answer to "what did I buy".
        */
-      [`sales_${base}`]: {
+      [`sales_${base}`]: opTool(ops, "sales", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
         description:
-          `What "${identifier.instanceName}" sold: money and units per product. ` +
+          `What "${shop}" sold: money and units per product. ` +
           `Narrow it with productId or since (a date); it pages with cursor, and totals only the page it read.`,
-        parameters: z.object({
-          productId: z.string().optional(),
-          since: z.string().optional(),
-          cursor: z.string().optional(),
-          limit: z.number().int().min(1).max(100).optional(),
-        }),
         readOnly: true,
-        execute: async (args: unknown) => {
-          const r = await op<{
-            products: { name: string; units: number; centsSold: number }[];
-            unitsSold: number;
-            centsSold: number;
-            nextCursor: string | null;
-            countsSalesFrom: string | null;
-          }>("sales", args);
-          if (!r.products.length) {
-            return r.countsSalesFrom
-              ? `Nothing sold in that window. Sales are counted from ${r.countsSalesFrom}.`
-              : "Nothing sold yet.";
-          }
-          const lines = r.products.map((p) => `${p.name} · ${p.units} sold · ${(p.centsSold / 100).toFixed(2)}`);
+        say: (r: { products: { name: string; units: number; centsSold: number }[]; unitsSold: number; centsSold: number; nextCursor: string | null; countsSalesFrom: string | null }) => {
+          if (!r.products.length) return r.countsSalesFrom ? `Nothing sold in that window. Sales are counted from ${r.countsSalesFrom}.` : "Nothing sold yet.";
+          const lines = r.products.map((p) => `${p.name} · ${p.units} sold · ${money(p.centsSold)}`);
           return (
-            `${r.unitsSold} item${r.unitsSold === 1 ? "" : "s"}, ${(r.centsSold / 100).toFixed(2)} total\n` +
+            `${r.unitsSold} item${r.unitsSold === 1 ? "" : "s"}, ${money(r.centsSold)} total\n` +
             lines.join("\n") +
             (r.nextCursor ? `\nMore: cursor ${r.nextCursor}` : "") +
             (r.countsSalesFrom ? `\nCounted from ${r.countsSalesFrom}.` : "")
           );
         },
-      },
-      [`set_order_status_${base}`]: {
-        description: `Move an order of "${identifier.instanceName}" along: new → preparing → shipped → fulfilled, or refunded. Staff and the owner only. Returns the address to ship to, so the next thing said can be the label.`,
-        parameters: z.object({
-          orderId: z.string().describe("The order id, as list_orders shows it"),
-          status: z.enum(["new", "preparing", "shipped", "fulfilled", "refunded"]),
-        }),
-        execute: async (args: { orderId: string; status: string }) => {
-          const r = await op<{ id: string; status: string; shipTo: { name?: string; street?: string; city?: string } | null }>("set-order-status", args);
-          // Not a catalogue change either — see the note in `checkout` above.
+      }),
+      [`set_order_status_${base}`]: opTool(ops, "set-order-status", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Move an order of "${shop}" along: new → preparing → shipped → fulfilled, or refunded. Staff and the owner only. Returns the address to ship to, so the next thing said can be the label.`,
+        say: (r: { id: string; status: string; shipTo: { name?: string; street?: string; city?: string } | null }) => {
           const to = r.shipTo && typeof r.shipTo === "object" ? [r.shipTo.name, r.shipTo.street, r.shipTo.city].filter(Boolean).join(", ") : "";
           return `Order ${r.id} is now ${r.status}.${to ? ` Ship to: ${to}.` : ""} The customer has been told; nobody else was.`;
         },
-      },
-      [`add_product_${base}`]: {
-        description: `Add a product to "${identifier.instanceName}" (owner only).`,
-        // EVERY FIELD THE OP ACCEPTS IS DECLARED HERE, and that is not
-        // tidiness: zod STRIPS what a schema does not name, so a tool whose
-        // parameters lag its op drops arguments silently and answers "Added
-        // Earl Grey" while the picture you passed went nowhere. Found by
-        // photographing the shelf and seeing the drawn fallback (2026-09-12).
-        parameters: z.object({
-          name: z.string().min(1).max(80),
-          priceCents: z.number().int().min(0),
-          sku: z.string().max(40).optional(),
-          description: z.string().max(2000).optional().describe("What it is, in the shop's own words — the product page is mostly this"),
-          tagline: z.string().max(140).optional().describe("One line the shelf shows under the name"),
-          imageUrl: z.string().max(500).optional().describe("A photograph of it — an https link"),
-          tags: z.array(z.string().min(1).max(24)).max(8).optional().describe('How the storefront groups it: "tea", "gifts", "new"'),
-        }),
-        execute: async (args: { name: string }) => {
-          // The OP records the catalogue change now, with a change id derived
-          // from the product and the departments it introduced. This tool used
-          // to dispatch its own with a random id, so every product bumped the
-          // version twice and none of them recorded a department — the reason
-          // a shop stocked by its agent had no departments at all while its
-          // catalogue version climbed past thirty (2026-09-12).
-          const p = await op<{ tags: string[] }>("add-product", args);
-          return `Added ${args.name}${p.tags?.length ? ` under ${p.tags.join(", ")}` : ""}.`;
-        },
-      },
+      }),
+      // The OP records the catalogue change, with a change id derived from the
+      // product — so the UI's own optimistic dispatch of the same fact is a
+      // no-op, and a shop stocked by its agent has departments.
+      [`add_product_${base}`]: opTool(ops, "add-product", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Add a product to "${shop}" (owner only), with its words, its price, its picture and its departments.`,
+        say: (p: { tags: string[]; imageUrl?: string | null }, a) => `Added ${a.name}${p.tags?.length ? ` under ${p.tags.join(", ")}` : ""}${a.imageUrl ? ", with its picture" : ""}.`,
+      }),
       /**
        * WRITING THE SHOP, which is most of running one. A description written
        * badly used to be permanent and a photograph taken later had nowhere to
        * go: the app could only ADD. Only the fields named are touched.
        */
-      [`update_product_${base}`]: {
+      [`update_product_${base}`]: opTool(ops, "update-product", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
         description:
-          `Change a product of "${identifier.instanceName}" (owner only): its words, its price, its picture, its departments, ` +
+          `Change a product of "${shop}" (owner only): its words, its price, its picture, its departments, ` +
           `or take it off the shelves with active:false (the row and its sales are kept). Only what you name is changed.`,
-        parameters: z.object({
-          productId: z.string().min(1),
-          name: z.string().min(1).max(80).optional(),
-          priceCents: z.number().int().min(0).optional(),
-          description: z.string().max(2000).optional().describe("The product page is mostly this — write it like a shop would"),
-          tagline: z.string().max(140).optional().describe("One line the shelf shows under the name"),
-          tags: z.array(z.string().min(1).max(24)).max(8).optional(),
-          imageUrl: z.string().max(500).optional().describe("A photograph of it — an https link"),
-          active: z.boolean().optional(),
-        }),
-        execute: async (args: { productId: string }) => {
-          const p = await op<{ name: string; active: boolean; imageUrl: string | null }>("update-product", args);
-          return `${p.name}: updated${p.active ? "" : " and taken off the shelves"}${p.imageUrl ? ", picture set" : ""}.`;
-        },
-      },
+        say: (p: { name: string; active: boolean; imageUrl: string | null }) => `${p.name}: updated${p.active ? "" : " and taken off the shelves"}${p.imageUrl ? ", picture set" : ""}.`,
+      }),
       /**
        * WHO ELSE RUNS THE SHOP. The desk has a screen for this, so the tools
        * must have it too — "an assistant can do anything on this page that you
        * can" is a claim the toolkit either keeps or breaks.
        */
-      [`give_access_${base}`]: {
+      [`give_access_${base}`]: opTool(ops, "set-person-role", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
         description:
-          `Give an esoul account a role in "${identifier.instanceName}" by their email (owner only): ` +
+          `Give an esoul account a role in "${shop}" by their email (owner only): ` +
           `customer, staff or owner. An empty role takes the access back. They must have signed into esoul at least once.`,
-        parameters: z.object({
-          email: z.string().min(3).max(200),
-          role: z.string().max(40).describe('One of the shop\'s own words — "staff", "customer", "owner" — or "" to take it back'),
-        }),
-        execute: async (args: { email: string; role: string }) => {
-          const r = await op<{ email: string; role: string; removed: boolean }>("set-person-role", args);
-          return r.removed ? `${r.email} no longer has access.` : `${r.email} is now ${r.role} of "${identifier.instanceName}".`;
-        },
-      },
-      [`list_access_${base}`]: {
-        description: `Who has been given a role in "${identifier.instanceName}", and which roles it has to give (owner only).`,
-        parameters: z.object({}),
+        say: (r: { email: string; role: string; removed: boolean }) => (r.removed ? `${r.email} no longer has access.` : `${r.email} is now ${r.role} of "${shop}".`),
+      }),
+      [`list_access_${base}`]: opTool(ops, "list-people", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Who has been given a role in "${shop}", and which roles it has to give (owner only).`,
         readOnly: true,
-        execute: async () => {
-          const r = await op<{ people: { email: string | null; role: string }[]; roles: string[] }>("list-people", {});
-          if (!r.people.length) return `Nobody else has access. The roles this shop can give: ${r.roles.join(", ") || "none"}.`;
-          return r.people.map((p) => `${p.email ?? "an account"} — ${p.role}`).join("\n");
-        },
-      },
+        say: (r: { people: { email: string | null; role: string }[]; roles: string[] }) =>
+          r.people.length ? r.people.map((p) => `${p.email ?? "an account"} — ${p.role}`).join("\n") : `Nobody else has access. The roles this shop can give: ${r.roles.join(", ") || "none"}.`,
+      }),
+      /** The desk's board, which the desk's own screen also writes. */
+      [`post_notice_${base}`]: opTool(ops, "post-notice", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Post a notice on the desk of "${shop}" for staff (staff and the owner). An empty text clears the board.`,
+        say: (_r: unknown, a) => (a.text?.trim() ? `Posted: "${a.text.trim()}".` : "The notice board is clear."),
+      }),
       /** The shop's own face: a picture across the top, a line, an accent. */
-      [`set_shop_look_${base}`]: {
+      [`set_shop_look_${base}`]: opTool(ops, "set-look", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
         description:
-          `Set how "${identifier.instanceName}" LOOKS (owner only): heroUrl (an https picture across the top, or null for the ` +
+          `Set how "${shop}" LOOKS (owner only): heroUrl (an https picture across the top, or null for the ` +
           `shop's own pattern), tagline (the line under its name), accent (stone, amber, rose, emerald, indigo).`,
-        parameters: z.object({
-          heroUrl: z.string().max(500).nullable().optional(),
-          tagline: z.string().max(160).nullable().optional(),
-          accent: z.enum(["stone", "amber", "rose", "emerald", "indigo"]).optional(),
-        }),
-        execute: async (args: unknown) => {
-          const r = await op<{ heroUrl: string | null; tagline: string | null; accent: string | null }>("set-look", args);
+        say: (r: { heroUrl: string | null; tagline: string | null; accent: string | null }) => {
           const said = [r.heroUrl ? "picture" : null, r.tagline ? "tagline" : null, r.accent ? `accent ${r.accent}` : null].filter(Boolean);
           return `The shop's look: ${said.length ? said.join(", ") : "cleared"}.`;
         },
-      },
+      }),
     };
-    for (const t of Object.values(tools)) t.onClient = t.execute;
     return tools;
   },
 };

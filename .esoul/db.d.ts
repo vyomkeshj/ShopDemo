@@ -67,6 +67,8 @@ export interface ProductRow {
   sku: string | null;
   active: boolean;
   description: string | null;
+  tagline: string | null;
+  imageUrl: string | null;
   tags: string[];
 }
 export interface ProductCreate {
@@ -75,6 +77,8 @@ export interface ProductCreate {
   sku?: string | null;
   active?: boolean;
   description?: string | null;
+  tagline?: string | null;
+  imageUrl?: string | null;
   tags?: string[];
 }
 export type ProductFilterable = "active" | "createdAt" | "id" | "name" | "ownerId" | "sku" | "tags";
@@ -167,4 +171,3 @@ export interface ShopDemoDb {
   address: Collection<AddressRow, AddressCreate, AddressFilterable>;
   $transaction<T>(fn: (tx: ShopDemoDb) => Promise<T>): Promise<T>;
 }
-

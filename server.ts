@@ -9,79 +9,19 @@
 // itself is what only a server can: PRICE the order from the catalogue, never
 // from the client.
 import "server-only";
-import { z } from "zod";
+import { handleOp } from "esoul-sdk";
 import { pluginDb, sseStream } from "esoul-sdk/server";
 import type { PluginOpContext, PluginRouteContext, PluginServerModule } from "esoul-sdk/server";
 import type { ShopDemoDb } from "./.esoul/db";
 // The shop's own ids and its catalogue event: the op records the change on the
 // timeline, so an agent stocking the shop fills the departments too.
 import { announcedEvent, catalogueChangedEvent, shopLookSetEvent } from "./app";
+// What every op TAKES, declared once and shared with app.tsx: `handleOp` below
+// parses with it and refuses a field it does not name; the tools are derived
+// from the same object. There is no second schema here for a tool to drift from.
+import { ImageUrl, ops, SALES_PAGE, type OpIn } from "./ops";
 
 const db = (ctx: PluginOpContext) => pluginDb<ShopDemoDb>(ctx);
-
-const OrderInput = z.object({
-  lines: z.array(z.object({ productId: z.string().min(1), qty: z.number().int().min(1).max(99) })).min(1).max(50),
-  shipTo: z.object({ name: z.string().min(1).max(120), street: z.string().min(1).max(200), city: z.string().min(1).max(120) }),
-  note: z.string().max(280).optional(),
-});
-
-const ProductInput = z.object({
-  name: z.string().min(1).max(80),
-  priceCents: z.number().int().min(0).max(100_000_000),
-  sku: z.string().min(1).max(40).optional(),
-  /** What it IS, in the shop's own words. The detail page is mostly this. */
-  description: z.string().max(2000).optional(),
-  /** One line for the shelf, under the name. */
-  tagline: z.string().max(140).optional(),
-  /** A photograph of it, as an https link. */
-  imageUrl: z.string().max(500).optional(),
-  /** How the storefront groups things: "tea", "gifts", "new". Lower-case, few. */
-  tags: z.array(z.string().min(1).max(24)).max(8).optional(),
-});
-
-/**
- * A PICTURE IS A URL WE WILL PUT IN AN `img src`, so it is checked here rather
- * than trusted: https only, and short enough to be a link rather than an
- * embedded payload. A `data:` URL would work in a browser and would also let
- * anyone with the owner's tool put a megabyte in a row that every shopper
- * downloads; `javascript:` is inert in an `img` but belongs nowhere near one.
- */
-const ImageUrl = z
-  .string()
-  .max(500)
-  .refine((u) => /^https:\/\/[^\s]+$/i.test(u), { message: "a picture must be an https:// link" });
-
-const UpdateProductInput = z.object({
-  productId: z.string().min(1),
-  name: z.string().min(1).max(80).optional(),
-  priceCents: z.number().int().min(0).max(100_000_000).optional(),
-  description: z.string().max(2000).optional(),
-  /** One line the shelf can show under the name. */
-  tagline: z.string().max(140).optional(),
-  tags: z.array(z.string().min(1).max(24)).max(8).optional(),
-  imageUrl: ImageUrl.optional(),
-  /** Off the shelves without losing the row, or back on. */
-  active: z.boolean().optional(),
-});
-
-const LookInput = z.object({
-  /** The picture across the top of the shop. */
-  heroUrl: ImageUrl.nullable().optional(),
-  /** The sentence under the shop's name. */
-  tagline: z.string().max(160).nullable().optional(),
-  /** One of the shop's own palettes, by name — never raw CSS. */
-  accent: z.enum(["stone", "amber", "rose", "emerald", "indigo"]).optional(),
-});
-
-const BrowseInput = z.object({
-  /** One department, as the storefront's chips offer it. */
-  tag: z.string().min(1).max(24).optional(),
-  /** What the shopper typed. */
-  q: z.string().min(1).max(60).optional(),
-  /** The id of the last product on the previous page. */
-  cursor: z.string().min(1).optional(),
-  limit: z.number().int().min(1).max(48).optional(),
-});
 
 const PAGE = 24;
 
@@ -98,8 +38,7 @@ const PAGE = 24;
  *
  * `read: anyone` in the manifest, so a stranger on the link reaches it.
  */
-async function browse(ctx: PluginOpContext) {
-  const { tag, q, cursor, limit } = BrowseInput.parse(ctx.args ?? {});
+async function browse(ctx: PluginOpContext, { tag, q, cursor, limit }: OpIn<"browse">) {
   const d = await db(ctx);
   const take = limit ?? PAGE;
   const rows = await d.product.findMany({
@@ -128,8 +67,7 @@ async function browse(ctx: PluginOpContext) {
 }
 
 /** The owner: a product. The rule (`write: ["owner"]`) refuses everyone else. */
-async function addProduct(ctx: PluginOpContext) {
-  const input = ProductInput.parse(ctx.args);
+async function addProduct(ctx: PluginOpContext, input: OpIn<"add-product">) {
   const d = await db(ctx);
   const p = await d.product.create({
     data: {
@@ -165,8 +103,8 @@ async function addProduct(ctx: PluginOpContext) {
  * keeps the row, which is what a shop actually wants for last winter's stock —
  * and for the rows a test left behind.
  */
-async function updateProduct(ctx: PluginOpContext) {
-  const input = UpdateProductInput.parse(ctx.args) as {
+async function updateProduct(ctx: PluginOpContext, parsed: OpIn<"update-product">) {
+  const input = parsed as {
     productId: string;
     name?: string;
     priceCents?: number;
@@ -216,8 +154,8 @@ function changeKindOf(input: Record<string, unknown>): string {
  * because a look is the kind of thing somebody will want to undo. `null`
  * clears; a field left out is left alone.
  */
-async function setLook(ctx: PluginOpContext) {
-  const input = LookInput.parse(ctx.args ?? {}) as { heroUrl?: string | null; tagline?: string | null; accent?: string };
+async function setLook(ctx: PluginOpContext, parsed: OpIn<"set-look">) {
+  const input = parsed as { heroUrl?: string | null; tagline?: string | null; accent?: string };
   if (input.heroUrl === undefined && input.tagline === undefined && input.accent === undefined) {
     throw new Error("say what to change: heroUrl, tagline or accent");
   }
@@ -236,8 +174,7 @@ async function setLook(ctx: PluginOpContext) {
  * reads the fold, so a notice appears on every open page without a refresh.
  * An empty text CLEARS the board rather than posting a blank.
  */
-async function postNotice(ctx: PluginOpContext) {
-  const { text } = z.object({ text: z.string().max(200) }).parse(ctx.args) as { text: string };
+async function postNotice(ctx: PluginOpContext, { text }: OpIn<"post-notice">) {
   const trimmed = text.trim();
   await ctx.emit(announcedEvent.eventName, {
     id: `notice:${Date.now()}`,
@@ -264,10 +201,7 @@ async function listPeople(ctx: PluginOpContext) {
   return listAppRoles(ctx);
 }
 
-async function setPersonRole(ctx: PluginOpContext) {
-  const { email, role } = z
-    .object({ email: z.string().min(3).max(200), role: z.string().max(40) })
-    .parse(ctx.args) as { email: string; role: string };
+async function setPersonRole(ctx: PluginOpContext, { email, role }: OpIn<"set-person-role">) {
   const { setAppRole } = await import("esoul-sdk/server");
   const r = await setAppRole(ctx, { email, role });
   // The refusal is the platform's own words — "no esoul account has that
@@ -432,10 +366,10 @@ async function priceAndPlace(
   return { orderId: order.id, totalCents, deskTold };
 }
 
-async function placeOrder(ctx: PluginOpContext) {
+async function placeOrder(ctx: PluginOpContext, parsed: OpIn<"place-order">) {
   // The repo compiles with `strict: false`, where zod's inferred output makes
   // every field optional; the shapes the parser guarantees are named here.
-  const input = OrderInput.parse(ctx.args) as { lines: Wanted[]; shipTo: ShipToAddress; note?: string };
+  const input = parsed as { lines: Wanted[]; shipTo: ShipToAddress; note?: string };
   const d = await db(ctx);
   return priceAndPlace(ctx, d, input.lines, input.shipTo, input.note);
 }
@@ -447,14 +381,12 @@ async function placeOrder(ctx: PluginOpContext) {
 // refused the blank before the account could supply it, which is the shape a
 // kind intention takes when the gate above it never let it run (2026-09-12).
 // Street and city stay required: nobody else knows where the parcel goes.
-const ShipTo = z.object({ name: z.string().max(120), street: z.string().min(1).max(200), city: z.string().min(1).max(120) });
 
 /**
  * ONE product, with everything its page shows. `public`, because a detail page
  * is how a stranger decides to buy.
  */
-async function product(ctx: PluginOpContext) {
-  const { productId } = z.object({ productId: z.string().min(1) }).parse(ctx.args);
+async function product(ctx: PluginOpContext, { productId }: OpIn<"product">) {
   const d = await db(ctx);
   const [p] = await d.product.findMany({ where: { id: productId }, take: 1 });
   if (!p || !p.active) throw new Error(`no product ${productId} in this shop`);
@@ -507,8 +439,7 @@ async function cartChanged(ctx: PluginOpContext, cart: { lines: unknown[]; total
 }
 
 /** Put something in the basket, or add to what is already there. */
-async function addToCart(ctx: PluginOpContext) {
-  const { productId, qty } = z.object({ productId: z.string().min(1), qty: z.number().int().min(1).max(99).default(1) }).parse(ctx.args);
+async function addToCart(ctx: PluginOpContext, { productId, qty }: OpIn<"add-to-cart">) {
   const d = await db(ctx);
   const [p] = await d.product.findMany({ where: { id: productId, active: true }, take: 1 });
   if (!p) throw new Error(`no product ${productId} in this shop`);
@@ -521,8 +452,7 @@ async function addToCart(ctx: PluginOpContext) {
 }
 
 /** Change how many — or zero, which takes it out. */
-async function setCartQty(ctx: PluginOpContext) {
-  const { productId, qty } = z.object({ productId: z.string().min(1), qty: z.number().int().min(0).max(99) }).parse(ctx.args);
+async function setCartQty(ctx: PluginOpContext, { productId, qty }: OpIn<"set-cart-qty">) {
   const d = await db(ctx);
   const [existing] = await d.cartLine.findMany({ where: { product: productId }, take: 1 });
   if (!existing) throw new Error("that is not in your basket");
@@ -564,8 +494,8 @@ async function whoIsThis(ctx: PluginOpContext): Promise<{ name: string | null; e
  * list of wishes, not a quote — then the basket is emptied, because an order
  * that exists and a basket that still holds it is how people buy twice.
  */
-async function checkout(ctx: PluginOpContext) {
-  const { shipTo, note } = z.object({ shipTo: ShipTo, note: z.string().max(280).optional() }).parse(ctx.args) as { shipTo: ShipToAddress; note?: string };
+async function checkout(ctx: PluginOpContext, parsed: OpIn<"checkout">) {
+  const { shipTo, note } = parsed as { shipTo: ShipToAddress; note?: string };
   // WHO IS BUYING, in words. The shop asks the platform rather than the
   // customer: they signed into esoul already, so making them type their name
   // again is a small rudeness, and a receipt needs somewhere to go. One read,
@@ -620,19 +550,8 @@ async function checkout(ctx: PluginOpContext) {
  * for that extra row. Asking for 200 and being refused at 201 is the kind of
  * off-by-one that only ever appears once somebody runs it.
  */
-const SALES_PAGE = 100;
 
-const SalesInput = z.object({
-  /** One product's history, when you want it. */
-  productId: z.string().min(1).optional(),
-  /** ISO date, or anything `new Date` reads. Sales from this moment on. */
-  since: z.string().min(4).optional(),
-  cursor: z.string().min(1).optional(),
-  limit: z.number().int().min(1).max(SALES_PAGE).optional(),
-});
-
-async function sales(ctx: PluginOpContext) {
-  const { productId, since, cursor, limit } = SalesInput.parse(ctx.args ?? {});
+async function sales(ctx: PluginOpContext, { productId, since, cursor, limit }: OpIn<"sales">) {
   const d = await db(ctx);
   const from = since ? new Date(since) : null;
   if (from && Number.isNaN(from.getTime())) throw new Error(`"${since}" is not a date I can read`);
@@ -699,8 +618,7 @@ async function listOrders(ctx: PluginOpContext) {
 }
 
 /** Staff or the owner. A customer is refused by `update: { roles: [staff, owner] }`. */
-async function refund(ctx: PluginOpContext) {
-  const { orderId } = z.object({ orderId: z.string().min(1) }).parse(ctx.args);
+async function refund(ctx: PluginOpContext, { orderId }: OpIn<"refund">) {
   const d = await db(ctx);
   const o = await d.order.update({ where: { id: orderId }, data: { status: "refunded" } });
   // The customer hears about their own refund — and only they do. Two
@@ -724,12 +642,7 @@ async function refund(ctx: PluginOpContext) {
  * a server can: that the status is one the shop recognises, in an order that
  * makes sense, and that the person whose order it is hears about it.
  */
-const STATUSES = ["new", "preparing", "shipped", "fulfilled", "refunded"] as const;
-
-async function setOrderStatus(ctx: PluginOpContext) {
-  const { orderId, status } = z
-    .object({ orderId: z.string().min(1), status: z.enum(STATUSES) })
-    .parse(ctx.args);
+async function setOrderStatus(ctx: PluginOpContext, { orderId, status }: OpIn<"set-order-status">) {
   const d = await db(ctx);
   const o = await d.order.update({ where: { id: orderId }, data: { status } });
   // TELLING THE CUSTOMER IS A SEPARATE, DURABLE JOB.
@@ -759,8 +672,7 @@ async function setOrderStatus(ctx: PluginOpContext) {
  * the desk) reaches it — a customer has no reason to ask this question and no
  * way to ask it about someone else.
  */
-async function orderNotice(ctx: PluginOpContext) {
-  const { orderId } = z.object({ orderId: z.string().min(1) }).parse(ctx.args);
+async function orderNotice(ctx: PluginOpContext, { orderId }: OpIn<"order-notice">) {
   const d = await db(ctx);
   const [o] = await d.order.findMany({ where: { id: orderId }, take: 1 });
   if (!o) throw new Error(`no order ${orderId} in this shop`);
@@ -775,8 +687,7 @@ async function orderNotice(ctx: PluginOpContext) {
  * fulfilled and none of another's. (A task never imports server code itself;
  * it reaches its tables through an op, the way every platform app does.)
  */
-async function fulfilOrder(ctx: PluginOpContext) {
-  const { orderId } = z.object({ orderId: z.string().min(1) }).parse(ctx.args);
+async function fulfilOrder(ctx: PluginOpContext, { orderId }: OpIn<"fulfil-order">) {
   const d = await db(ctx);
   const o = await d.order.update({ where: { id: orderId }, data: { status: "fulfilled" } });
   // `ownerId` so the task can tell THIS customer and nobody else. It is the
@@ -814,27 +725,30 @@ async function orderUpdates(ctx: PluginRouteContext): Promise<Response> {
 }
 
 export const pluginServer: PluginServerModule = {
+  // Each handler receives PARSED input (./ops.ts) and refuses a field the op
+  // does not take — `invalid`, naming the field. The tools are derived from
+  // the same declarations, so nothing an agent passes is dropped on the way in.
   ops: {
-    browse,
-    product,
-    "add-to-cart": addToCart,
-    "set-cart-qty": setCartQty,
-    "view-cart": viewCart,
-    me,
-    checkout,
-    "add-product": addProduct,
-    "update-product": updateProduct,
-    "set-look": setLook,
-    "post-notice": postNotice,
-    "list-people": listPeople,
-    "set-person-role": setPersonRole,
-    "place-order": placeOrder,
-    "list-orders": listOrders,
-    sales,
-    refund,
-    "set-order-status": setOrderStatus,
-    "order-notice": orderNotice,
-    "fulfil-order": fulfilOrder,
+    browse: handleOp(ops, "browse", browse),
+    product: handleOp(ops, "product", product),
+    "add-to-cart": handleOp(ops, "add-to-cart", addToCart),
+    "set-cart-qty": handleOp(ops, "set-cart-qty", setCartQty),
+    "view-cart": handleOp(ops, "view-cart", viewCart),
+    me: handleOp(ops, "me", me),
+    checkout: handleOp(ops, "checkout", checkout),
+    "add-product": handleOp(ops, "add-product", addProduct),
+    "update-product": handleOp(ops, "update-product", updateProduct),
+    "set-look": handleOp(ops, "set-look", setLook),
+    "post-notice": handleOp(ops, "post-notice", postNotice),
+    "list-people": handleOp(ops, "list-people", listPeople),
+    "set-person-role": handleOp(ops, "set-person-role", setPersonRole),
+    "place-order": handleOp(ops, "place-order", placeOrder),
+    "list-orders": handleOp(ops, "list-orders", listOrders),
+    sales: handleOp(ops, "sales", sales),
+    refund: handleOp(ops, "refund", refund),
+    "set-order-status": handleOp(ops, "set-order-status", setOrderStatus),
+    "order-notice": handleOp(ops, "order-notice", orderNotice),
+    "fulfil-order": handleOp(ops, "fulfil-order", fulfilOrder),
   },
   routes: { "order-updates": orderUpdates },
 };

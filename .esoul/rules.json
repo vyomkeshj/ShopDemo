@@ -34,6 +34,16 @@
           "optional": true,
           "list": false
         },
+        "tagline": {
+          "type": "string",
+          "optional": true,
+          "list": false
+        },
+        "imageUrl": {
+          "type": "string",
+          "optional": true,
+          "list": false
+        },
         "tags": {
           "type": "string",
           "optional": false,
@@ -47,16 +57,34 @@
         ]
       ],
       "indexes": [
-        [
-          "active"
-        ]
+        {
+          "fields": [
+            "active",
+            "createdAt"
+          ],
+          "kind": "btree"
+        },
+        {
+          "fields": [
+            "tags"
+          ],
+          "kind": "contains"
+        },
+        {
+          "fields": [
+            "name"
+          ],
+          "kind": "text"
+        }
       ],
       "filterable": [
         "active",
         "createdAt",
         "id",
+        "name",
         "ownerId",
-        "sku"
+        "sku",
+        "tags"
       ],
       "rules": {
         "read": {
@@ -126,9 +154,12 @@
       "sealed": [],
       "unique": [],
       "indexes": [
-        [
-          "product"
-        ]
+        {
+          "fields": [
+            "product"
+          ],
+          "kind": "btree"
+        }
       ],
       "filterable": [
         "createdAt",
@@ -230,15 +261,24 @@
       "sealed": [],
       "unique": [],
       "indexes": [
-        [
-          "status"
-        ],
-        [
-          "createdAt"
-        ],
-        [
-          "product"
-        ]
+        {
+          "fields": [
+            "status"
+          ],
+          "kind": "btree"
+        },
+        {
+          "fields": [
+            "createdAt"
+          ],
+          "kind": "btree"
+        },
+        {
+          "fields": [
+            "product"
+          ],
+          "kind": "btree"
+        }
       ],
       "filterable": [
         "createdAt",
@@ -300,6 +340,137 @@
           "creatorMay": [
             "note"
           ],
+          "fields": null
+        },
+        "delete": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        }
+      }
+    },
+    "OrderLine": {
+      "name": "OrderLine",
+      "key": "orderLine",
+      "scope": "instance",
+      "ownedByCreator": true,
+      "fields": {
+        "order": {
+          "type": "ref",
+          "optional": false,
+          "list": false,
+          "ref": "Order"
+        },
+        "product": {
+          "type": "ref",
+          "optional": true,
+          "list": false,
+          "ref": "Product"
+        },
+        "name": {
+          "type": "string",
+          "optional": false,
+          "list": false
+        },
+        "sku": {
+          "type": "string",
+          "optional": true,
+          "list": false
+        },
+        "qty": {
+          "type": "int",
+          "optional": false,
+          "list": false
+        },
+        "priceCents": {
+          "type": "int",
+          "optional": false,
+          "list": false
+        }
+      },
+      "sealed": [],
+      "unique": [],
+      "indexes": [
+        {
+          "fields": [
+            "order"
+          ],
+          "kind": "btree"
+        },
+        {
+          "fields": [
+            "product",
+            "createdAt"
+          ],
+          "kind": "btree"
+        },
+        {
+          "fields": [
+            "createdAt"
+          ],
+          "kind": "btree"
+        }
+      ],
+      "filterable": [
+        "createdAt",
+        "id",
+        "order",
+        "ownerId",
+        "product"
+      ],
+      "rules": {
+        "read": {
+          "principals": [
+            {
+              "t": "creator"
+            },
+            {
+              "t": "role",
+              "role": "staff"
+            },
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
+          "fields": null
+        },
+        "create": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "customer"
+            },
+            {
+              "t": "role",
+              "role": "staff"
+            },
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": true,
+          "creatorMay": null,
+          "fields": null
+        },
+        "update": {
+          "principals": [
+            {
+              "t": "role",
+              "role": "owner"
+            }
+          ],
+          "requiresAccount": false,
+          "creatorMay": null,
           "fields": null
         },
         "delete": {
