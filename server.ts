@@ -201,6 +201,40 @@ async function listPeople(ctx: PluginOpContext) {
   return listAppRoles(ctx);
 }
 
+/**
+ * COMPOSE A ROLE on top of `staff`, in the shop's own terms — which statuses it
+ * sees, which moves it may make, whether it sees the note, which desk actions
+ * it may call — and hand the platform the generic definition. The platform
+ * keeps it inside the manifest's `roles.custom` envelope and enforces it in
+ * every read and write from then on; this op only translates words.
+ */
+async function defineRole(ctx: PluginOpContext, input: OpIn<"define-role">) {
+  const { defineAppRole } = await import("esoul-sdk/server");
+  const moves = Object.fromEntries(Object.entries(input.moves ?? {}).filter(([, to]) => to && to.length));
+  const r = await defineAppRole(ctx, {
+    name: input.name,
+    base: "staff",
+    describe: input.describe,
+    ops: input.ops?.length ? input.ops : ["set-order-status"],
+    models: {
+      Order: {
+        where: { status: [...input.statuses] },
+        hide: input.hideNote ? ["note"] : [],
+        ...(Object.keys(moves).length ? { update: { transitions: moves } } : {}),
+      },
+    },
+  });
+  if (!r.ok) throw new Error(r.error ?? "the role could not be composed");
+  return { name: r.name ?? input.name, statuses: input.statuses, moves, hideNote: !!input.hideNote, ops: input.ops?.length ? input.ops : ["set-order-status"] };
+}
+
+async function removeRole(ctx: PluginOpContext, { name }: OpIn<"remove-role">) {
+  const { removeAppRole } = await import("esoul-sdk/server");
+  const r = await removeAppRole(ctx, name);
+  if (!r.ok) throw new Error(r.error ?? "the role could not be removed");
+  return { name, removed: true };
+}
+
 async function setPersonRole(ctx: PluginOpContext, { email, role }: OpIn<"set-person-role">) {
   const { setAppRole } = await import("esoul-sdk/server");
   const r = await setAppRole(ctx, { email, role });
@@ -471,7 +505,18 @@ async function setCartQty(ctx: PluginOpContext, { productId, qty }: OpIn<"set-ca
  */
 async function me(ctx: PluginOpContext) {
   const who = await whoIsThis(ctx);
-  return { name: who?.name ?? null, email: who?.email ?? null };
+  // The server says who you are: the base word the rules see, the composed
+  // role's name when there is one, and what it may do — so the desk hides a
+  // button the server would refuse, and never decides anything itself.
+  const custom = ctx.viewer.custom?.role;
+  const order = custom?.models.Order;
+  return {
+    name: who?.name ?? null,
+    email: who?.email ?? null,
+    role: ctx.viewer.role,
+    customRole: ctx.viewer.customRole ?? null,
+    can: custom ? { ops: custom.ops, statuses: (order?.where.status as string[] | undefined) ?? null, moves: order?.transitions?.moves ?? null, hidden: order?.hide ?? [] } : null,
+  };
 }
 
 /**
@@ -742,6 +787,8 @@ export const pluginServer: PluginServerModule = {
     "post-notice": handleOp(ops, "post-notice", postNotice),
     "list-people": handleOp(ops, "list-people", listPeople),
     "set-person-role": handleOp(ops, "set-person-role", setPersonRole),
+    "define-role": handleOp(ops, "define-role", defineRole),
+    "remove-role": handleOp(ops, "remove-role", removeRole),
     "place-order": handleOp(ops, "place-order", placeOrder),
     "list-orders": handleOp(ops, "list-orders", listOrders),
     sales: handleOp(ops, "sales", sales),

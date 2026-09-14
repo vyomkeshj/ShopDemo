@@ -115,6 +115,19 @@ export function ShopDesk(props: {
   run: (key: string, fn: () => Promise<void>) => Promise<void>;
 }) {
   const { instanceName, isOwner, canEdit, products, orders, op, refreshProducts, refreshOrders, busy, run } = props;
+  // WHAT THIS PERSON MAY DO, from the server — a composed role (a packer) sees
+  // only its statuses and may make only its moves; the desk hides the rest so
+  // nobody presses a button the server would refuse. The server decides anyway.
+  const [can, setCan] = useState<RoleCan | null | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    op<{ customRole: string | null; can: RoleCan | null }>("me")
+      .then((r) => alive && setCan(r.can ?? null))
+      .catch(() => alive && setCan(null));
+    return () => {
+      alive = false;
+    };
+  }, [op]);
   const accent = accentOf(props.look?.accent);
   const [tab, setTab] = useState<Tab>("queue");
   const [editing, setEditing] = useState<DeskProduct | "new" | null>(null);
@@ -198,7 +211,7 @@ export function ShopDesk(props: {
         ))}
       </nav>
 
-      {tab === "queue" ? <Queue orders={orders} accent={accent} busy={busy} run={run} op={op} refreshOrders={refreshOrders} /> : null}
+      {tab === "queue" ? <Queue orders={orders} accent={accent} busy={busy} run={run} op={op} refreshOrders={refreshOrders} can={can ?? null} /> : null}
       {tab === "shelves" ? (
         <Shelves
           products={products}
@@ -256,6 +269,14 @@ function Stat({ label, value, Icon, tone = "calm" }: { label: string; value: str
 
 /* ── the queue ───────────────────────────────────────────────────────────── */
 
+/** What a composed role may do, as `me` reports it. Null = the base word's full reach. */
+interface RoleCan {
+  ops: string[];
+  statuses: string[] | null;
+  moves: Record<string, string[]> | null;
+  hidden: string[];
+}
+
 function Queue({
   orders,
   accent,
@@ -263,11 +284,13 @@ function Queue({
   run,
   op,
   refreshOrders,
+  can,
 }: {
   orders: DeskOrder[] | null;
   accent: ReturnType<typeof accentOf>;
   busy: string | null;
   run: (key: string, fn: () => Promise<void>) => Promise<void>;
+  can: RoleCan | null;
   op: <T>(name: string, args?: unknown) => Promise<T>;
   refreshOrders: () => void;
 }) {
@@ -306,7 +329,10 @@ function Queue({
       {groups.open.length ? (
         <ul className="flex flex-col gap-2.5">
           {groups.open.map((o) => {
-            const next = NEXT[o.status];
+            // A composed role sees the next step only when it holds that move.
+            const step = NEXT[o.status];
+            const next = step && (!can || (can.moves?.[o.status] ?? []).includes(step.to)) ? step : undefined;
+            const mayRefund = !can || can.ops.includes("refund");
             const at = FLOW.indexOf(o.status as (typeof FLOW)[number]);
             return (
               <li key={o.id} className={`overflow-hidden rounded-2xl bg-white/80 ring-1 ${accent.ring} dark:bg-white/[0.04]`}>
@@ -363,14 +389,16 @@ function Queue({
                           {next.label}
                         </button>
                       ) : null}
-                      <button
-                        type="button"
-                        disabled={busy === o.id}
-                        onClick={() => move(o, "refunded")}
-                        className="rounded-lg border border-rose-300/70 px-2 py-1.5 text-[11.5px] text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-400/30 dark:text-rose-300 dark:hover:bg-rose-400/10"
-                      >
-                        Refund
-                      </button>
+                      {mayRefund ? (
+                        <button
+                          type="button"
+                          disabled={busy === o.id}
+                          onClick={() => move(o, "refunded")}
+                          className="rounded-lg border border-rose-300/70 px-2 py-1.5 text-[11.5px] text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-400/30 dark:text-rose-300 dark:hover:bg-rose-400/10"
+                        >
+                          Refund
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -1004,6 +1032,110 @@ interface Helper {
   grantedAt?: number;
 }
 
+/** A role the owner composed, as list-people returns it (the platform's generic shape). */
+interface ComposedRole {
+  name: string;
+  base: string;
+  describe?: string;
+  ops?: string[];
+  models?: { Order?: { where?: { status?: string[] }; hide?: string[]; update?: { transitions?: Record<string, string[]> } } };
+}
+
+const STATUS_FLOW = ["new", "preparing", "shipped", "fulfilled", "refunded"] as const;
+const DESK_OPS = ["set-order-status", "fulfil-order", "order-notice", "refund"] as const;
+
+/**
+ * COMPOSE A ROLE — the owner says, in the shop's words, what a packer or a
+ * courier is: which statuses they see, where they may move an order, whether
+ * they see the note, which desk actions they may call. The platform keeps the
+ * result inside the manifest's envelope and enforces it everywhere.
+ */
+function RoleComposer({ accent, op, busy, run, onDone }: { accent: ReturnType<typeof accentOf>; op: <T>(name: string, args?: unknown) => Promise<T>; busy: string | null; run: (key: string, fn: () => Promise<void>) => Promise<void>; onDone: () => void }) {
+  const [name, setName] = useState("");
+  const [describe, setDescribe] = useState("");
+  const [statuses, setStatuses] = useState<string[]>(["preparing"]);
+  const [moves, setMoves] = useState<Record<string, string[]>>({ preparing: ["shipped"] });
+  const [hideNote, setHideNote] = useState(true);
+  const [opsAllowed, setOpsAllowed] = useState<string[]>(["set-order-status"]);
+  const [problem, setProblem] = useState<string | null>(null);
+  const toggle = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+  const submit = () =>
+    run("compose-role", async () => {
+      setProblem(null);
+      try {
+        await op("define-role", { name: name.trim(), describe: describe.trim() || undefined, statuses, moves: Object.fromEntries(statuses.map((s) => [s, moves[s] ?? []])), hideNote, ops: opsAllowed });
+        setName("");
+        setDescribe("");
+        onDone();
+      } catch (e) {
+        setProblem(String((e as Error)?.message ?? e));
+      }
+    });
+  const tick = "h-3.5 w-3.5 accent-stone-700";
+  return (
+    <form
+      className={`flex flex-col gap-3 rounded-2xl bg-white/70 p-3 ring-1 ${accent.ring} dark:bg-white/[0.04]`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (name.trim() && statuses.length) void submit();
+      }}
+    >
+      <p className="text-[12px] font-medium uppercase tracking-wide text-stone-500 dark:text-stone-400">Compose a role on top of staff</p>
+      <div className="flex flex-wrap gap-2">
+        <label className="flex min-w-[10rem] flex-1 flex-col gap-1">
+          <span className="text-[11px] text-stone-500">Name</span>
+          <input value={name} onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))} placeholder="packer" className={input} />
+        </label>
+        <label className="flex min-w-[14rem] flex-[2] flex-col gap-1">
+          <span className="text-[11px] text-stone-500">What it is for</span>
+          <input value={describe} onChange={(e) => setDescribe(e.target.value)} placeholder="packs what is being prepared" className={input} />
+        </label>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <fieldset className="flex flex-col gap-1">
+          <legend className="text-[11px] text-stone-500">Sees orders that are…</legend>
+          {STATUS_FLOW.map((s) => (
+            <label key={s} className="flex items-center gap-2 text-[12.5px]">
+              <input type="checkbox" className={tick} checked={statuses.includes(s)} onChange={() => setStatuses(toggle(statuses, s))} /> {s}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset className="flex flex-col gap-1">
+          <legend className="text-[11px] text-stone-500">…and may move them to</legend>
+          {statuses.map((from) => (
+            <div key={from} className="flex flex-wrap items-center gap-2 text-[12px]">
+              <span className="w-20 text-stone-500">{from} →</span>
+              {STATUS_FLOW.filter((t) => t !== from).map((to) => (
+                <label key={to} className="flex items-center gap-1">
+                  <input type="checkbox" className={tick} checked={(moves[from] ?? []).includes(to)} onChange={() => setMoves({ ...moves, [from]: toggle(moves[from] ?? [], to) })} /> {to}
+                </label>
+              ))}
+            </div>
+          ))}
+        </fieldset>
+      </div>
+      <div className="flex flex-wrap items-center gap-4 text-[12.5px]">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" className={tick} checked={hideNote} onChange={() => setHideNote(!hideNote)} /> never sees the customer&rsquo;s note
+        </label>
+        <span className="text-[11px] text-stone-500">may call:</span>
+        {DESK_OPS.map((o) => (
+          <label key={o} className="flex items-center gap-1">
+            <input type="checkbox" className={tick} checked={opsAllowed.includes(o)} onChange={() => setOpsAllowed(toggle(opsAllowed, o))} /> {o}
+          </label>
+        ))}
+      </div>
+      {problem ? <p className="rounded-xl border border-rose-300/60 bg-rose-50/70 px-3 py-2 text-[12px] text-rose-800 dark:border-rose-400/30 dark:bg-rose-400/10 dark:text-rose-100">{problem}</p> : null}
+      <div>
+        <button type="submit" disabled={!name.trim() || !statuses.length || busy === "compose-role"} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[12.5px] font-medium disabled:opacity-40 ${accent.pill}`}>
+          {busy === "compose-role" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <UserPlus className="h-4 w-4" aria-hidden />}
+          Compose the role
+        </button>
+      </div>
+    </form>
+  );
+}
+
 /**
  * PEOPLE — the owner hands someone an access level by their esoul email.
  *
@@ -1035,15 +1167,29 @@ function People({
   const [role, setRole] = useState("staff");
   const [problem, setProblem] = useState<string | null>(null);
   const [roles, setRoles] = useState<string[]>(["staff"]);
+  const [composed, setComposed] = useState<ComposedRole[]>([]);
 
   const load = useCallback(() => {
-    op<{ people: Helper[]; roles: string[] }>("list-people")
+    op<{ people: Helper[]; roles: string[]; custom?: ComposedRole[] }>("list-people")
       .then((r) => {
         setPeople(r.people);
         if (r.roles?.length) setRoles(r.roles);
+        setComposed(r.custom ?? []);
       })
       .catch((e) => setProblem(String((e as Error)?.message ?? e)));
   }, [op]);
+  const removeRole = (name: string) =>
+    run(`remove-role:${name}`, async () => {
+      setProblem(null);
+      try {
+        await op("remove-role", { name });
+        load();
+      } catch (e) {
+        setProblem(String((e as Error)?.message ?? e));
+      }
+    });
+  // The words the app declared, then the roles the owner composed — one list to give.
+  const giveable = [...roles, ...composed.map((c) => c.name)];
   useEffect(load, [load]);
 
   const grant = (to: string, asRole: string) =>
@@ -1087,7 +1233,7 @@ function People({
         <span className="flex flex-col gap-1">
           <span className="text-[11px] font-medium uppercase tracking-wide text-stone-500 dark:text-stone-400">As</span>
           <Select value={role} onChange={setRole} label="The role to give">
-            {roles.map((r) => (
+            {giveable.map((r) => (
               <option key={r} value={r}>
                 {r}
               </option>
@@ -1127,7 +1273,7 @@ function People({
                 <span className="block text-[10.5px] text-stone-400">{h.grantedAt ? `since ${new Date(h.grantedAt).toLocaleDateString()}` : "granted"}</span>
               </span>
               <Select value={h.role} onChange={(v) => void grant(h.email ?? h.userId, v)} label={`Access for ${h.email ?? h.userId}`}>
-                {roles.map((r) => (
+                {giveable.map((r) => (
                   <option key={r} value={r}>
                     {r}
                   </option>
@@ -1144,6 +1290,37 @@ function People({
           ))}
         </ul>
       )}
+
+      {composed.length ? (
+        <ul className="flex flex-col divide-y divide-stone-200/70 overflow-hidden rounded-2xl bg-white/70 ring-1 ring-stone-900/10 dark:divide-white/5 dark:bg-white/[0.04] dark:ring-white/10">
+          {composed.map((c) => {
+            const o = c.models?.Order;
+            const moves = Object.entries(o?.update?.transitions ?? {}).filter(([, to]) => to?.length);
+            return (
+              <li key={c.name} className="flex flex-wrap items-center gap-3 p-2.5">
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${accent.pill}`}>{c.name}</span>
+                <span className="min-w-0 flex-1 text-[12px] text-stone-600 dark:text-stone-300">
+                  on <span className="font-medium">{c.base}</span> · sees {(o?.where?.status ?? []).join(", ") || "every status"}
+                  {moves.length ? ` · may move ${moves.map(([f, t]) => `${f} → ${t.join("/")}`).join(", ")}` : " · may not move orders"}
+                  {(o?.hide ?? []).includes("note") ? " · never sees the note" : ""}
+                  {c.ops?.length ? ` · may call ${c.ops.join(", ")}` : ""}
+                  {c.describe ? <span className="block text-[11px] text-stone-400">{c.describe}</span> : null}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void removeRole(c.name)}
+                  disabled={busy === `remove-role:${c.name}`}
+                  className="inline-flex items-center gap-1 rounded-lg border border-stone-300/70 px-2 py-1 text-[11.5px] text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/15 dark:text-stone-300 dark:hover:bg-white/10"
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden /> Remove
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+
+      <RoleComposer accent={accent} op={op} busy={busy} run={run} onDone={load} />
     </div>
   );
 }

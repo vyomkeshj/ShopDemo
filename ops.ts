@@ -98,8 +98,23 @@ export const ops = defineOps({
   "list-people": z.object({}),
   "set-person-role": z.object({
     email: z.string().min(3).max(200).describe("The esoul account's email — they must have signed in once"),
-    role: z.string().max(40).describe('One of the shop\'s own words — "staff", "customer", "owner" — or "" to take it back'),
+    role: z.string().max(40).describe('One of the shop\'s own words — "staff", "customer", "owner" — or a role the owner composed (list-people names them) — or "" to take it back'),
   }),
+  /**
+   * COMPOSE A ROLE on top of `staff`: which order statuses it sees, which moves it may
+   * make, whether it sees the customer's note, which desk actions it may call. The
+   * platform keeps it inside the manifest's `roles.custom` envelope and enforces it in
+   * every read and write. Owner only.
+   */
+  "define-role": z.object({
+    name: z.string().regex(/^[a-z][a-z0-9_-]{0,30}$/).describe('A name of its own, e.g. "packer" — not one of the shop\'s words'),
+    describe: z.string().max(200).optional().describe("What this role is for, for the People screen"),
+    statuses: z.array(z.enum(ORDER_STATUSES)).min(1).max(5).describe("The order statuses this role SEES — a packer sees preparing"),
+    moves: z.record(z.enum(ORDER_STATUSES), z.array(z.enum(ORDER_STATUSES)).max(4)).optional().describe('The moves it may make, from → to: { "preparing": ["shipped"] }'),
+    hideNote: z.boolean().optional().describe("Hide the customer's note from this role (default false)"),
+    ops: z.array(z.enum(["set-order-status", "fulfil-order", "order-notice", "refund"])).optional().describe("Desk actions this role may call (default: set-order-status)"),
+  }),
+  "remove-role": z.object({ name: z.string().min(1).max(31) }),
   "place-order": z.object({
     lines: z.array(z.object({ productId, qty: z.number().int().min(1).max(99) })).min(1).max(50),
     shipTo: ShipTo,

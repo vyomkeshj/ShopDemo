@@ -564,16 +564,33 @@ export const pluginSchema: ApplicationSchema<ShopDemoData> = {
         nodeId: identifier.nodeId,
         description:
           `Give an esoul account a role in "${shop}" by their email (owner only): ` +
-          `customer, staff or owner. An empty role takes the access back. They must have signed into esoul at least once.`,
+          `customer, staff or owner — or a role the owner composed (compose_role; list_access names them). An empty role takes the access back. They must have signed into esoul at least once.`,
         say: (r: { email: string; role: string; removed: boolean }) => (r.removed ? `${r.email} no longer has access.` : `${r.email} is now ${r.role} of "${shop}".`),
       }),
       [`list_access_${base}`]: opTool(ops, "list-people", {
         pluginId: PLUGIN_ID,
         nodeId: identifier.nodeId,
-        description: `Who has been given a role in "${shop}", and which roles it has to give (owner only).`,
+        description: `Who has been given a role in "${shop}", which roles it has to give, and the roles the owner composed on top of staff (owner only).`,
         readOnly: true,
-        say: (r: { people: { email: string | null; role: string }[]; roles: string[] }) =>
-          r.people.length ? r.people.map((p) => `${p.email ?? "an account"} — ${p.role}`).join("\n") : `Nobody else has access. The roles this shop can give: ${r.roles.join(", ") || "none"}.`,
+        say: (r: { people: { email: string | null; role: string }[]; roles: string[]; custom?: { name: string; base: string; describe?: string }[] }) =>
+          (r.people.length ? r.people.map((p) => `${p.email ?? "an account"} — ${p.role}`).join("\n") : "Nobody else has access.") +
+          `\nRoles to give: ${[...r.roles, ...(r.custom ?? []).map((c) => c.name)].join(", ") || "none"}` +
+          ((r.custom ?? []).length ? `\nComposed: ${(r.custom ?? []).map((c) => `${c.name} (on ${c.base}${c.describe ? ` — ${c.describe}` : ""})`).join("; ")}` : ""),
+      }),
+      [`compose_role_${base}`]: opTool(ops, "define-role", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description:
+          `COMPOSE A ROLE for "${shop}" on top of staff (owner only): which order statuses it sees, which moves it may make, whether it sees the customer's note, which desk actions it may call. ` +
+          `Then give_access hands it to a person by email. Example: a packer sees "preparing" and may move preparing → shipped; a courier sees "shipped" and may move shipped → fulfilled.`,
+        say: (r: { name: string; statuses: string[]; moves: Record<string, string[]>; hideNote: boolean; ops: string[] }) =>
+          `Composed "${r.name}": sees ${r.statuses.join(", ")}; may move ${Object.entries(r.moves).map(([f, t]) => `${f} → ${t.join("/")}`).join(", ") || "nothing"}; ${r.hideNote ? "never sees the note" : "sees the note"}; may call ${r.ops.join(", ")}. give_access with role "${r.name}" hands it to someone.`,
+      }),
+      [`remove_role_${base}`]: opTool(ops, "remove-role", {
+        pluginId: PLUGIN_ID,
+        nodeId: identifier.nodeId,
+        description: `Remove a role the owner composed for "${shop}" (owner only). People holding it lose it.`,
+        say: (r: { name: string }) => `"${r.name}" is gone.`,
       }),
       /** The desk's board, which the desk's own screen also writes. */
       [`post_notice_${base}`]: opTool(ops, "post-notice", {

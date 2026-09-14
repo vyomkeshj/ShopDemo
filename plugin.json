@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "shop-demo",
   "name": "Shop (demo)",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "The SDK's reference app \u2014 the smallest thing that touches every access capability once: a catalogue anyone may browse, orders a signed-in customer places and sees only their own, a staff desk, and an owner who sets prices. Orders and addresses live in the app's own tables (plugin.json `db`), scoped by the platform; the catalogue version lives on the timeline.",
   "applicationType": "plugin_shop_demo",
   "entry": "app",
@@ -23,8 +23,32 @@
     },
     "describe": {
       "customer": "browses the catalogue, places orders and sees their own",
-      "staff": "sees and fulfils every order; never the customer's address book",
+      "staff": "sees and fulfils every order; never the customer's address book. The owner composes narrower roles on it \u2014 a packer, a courier",
       "owner": "everything, including prices"
+    },
+    "custom": {
+      "models": {
+        "Order": {
+          "where": [
+            "status"
+          ],
+          "hide": [
+            "note"
+          ],
+          "update": {
+            "fields": [
+              "note"
+            ],
+            "transitions": "status"
+          }
+        }
+      },
+      "ops": [
+        "set-order-status",
+        "fulfil-order",
+        "order-notice",
+        "refund"
+      ]
     }
   },
   "uses": {
@@ -101,17 +125,39 @@
       "access": "public",
       "requires": "account"
     },
-    "refund": {},
-    "set-order-status": {},
+    "refund": {
+      "access": [
+        "staff",
+        "owner"
+      ]
+    },
+    "set-order-status": {
+      "access": [
+        "staff",
+        "owner"
+      ]
+    },
     "add-product": {},
     "update-product": {},
     "set-look": {},
     "post-notice": {},
     "list-people": {},
     "set-person-role": {},
-    "fulfil-order": {},
-    "order-notice": {},
-    "sales": {}
+    "fulfil-order": {
+      "access": [
+        "staff",
+        "owner"
+      ]
+    },
+    "order-notice": {
+      "access": [
+        "staff",
+        "owner"
+      ]
+    },
+    "sales": {},
+    "define-role": {},
+    "remove-role": {}
   },
   "routes": {
     "order-updates": {
