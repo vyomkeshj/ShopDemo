@@ -145,13 +145,18 @@ export function ShopDesk(props: {
   }, [orders]);
   const unwritten = useMemo(() => (products ?? []).filter((p) => !p.description || !p.imageUrl).length, [products]);
 
+  // A COMPOSED ROLE works the queue it was handed and nothing else: shelves,
+  // people, till and look are the staff's and the owner's desks, backed by ops
+  // the owner did not give it (the server refuses them either way).
+  const composed = !!can;
   const TABS: { id: Tab; label: string; Icon: typeof Package; badge?: number }[] = [
-    { id: "queue", label: "Queue", Icon: ClipboardList, badge: waiting.length },
-    { id: "shelves", label: "Shelves", Icon: ShoppingBag, badge: unwritten || undefined },
-    { id: "people", label: "People", Icon: Users },
-    { id: "till", label: "Till", Icon: Banknote },
-    { id: "look", label: "Look", Icon: ImageIcon },
-  ];
+    { id: "queue" as Tab, label: "Queue", Icon: ClipboardList, badge: waiting.length },
+    { id: "shelves" as Tab, label: "Shelves", Icon: ShoppingBag, badge: unwritten || undefined },
+    { id: "people" as Tab, label: "People", Icon: Users },
+    { id: "till" as Tab, label: "Till", Icon: Banknote },
+    { id: "look" as Tab, label: "Look", Icon: ImageIcon },
+  ].filter((t) => !composed || t.id === "queue");
+  const shown: Tab = composed ? "queue" : tab;
 
   return (
     <div className="flex flex-col gap-4">
@@ -159,9 +164,13 @@ export function ShopDesk(props: {
              a back office is whether anything needs them. ───────────────── */}
       <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Waiting" value={String(waiting.length)} tone={waiting.length ? "warn" : "calm"} Icon={ClipboardList} />
-        <Stat label="Taken today" value={money(takenToday)} Icon={Banknote} />
-        <Stat label="On the shelves" value={products ? `${products.length}${props.nextCursor ? "+" : ""}` : "…"} Icon={ShoppingBag} />
-        <Stat label="Need work" value={String(unwritten)} tone={unwritten ? "warn" : "calm"} Icon={Pencil} />
+        {composed ? null : (
+          <>
+            <Stat label="Taken today" value={money(takenToday)} Icon={Banknote} />
+            <Stat label="On the shelves" value={products ? `${products.length}${props.nextCursor ? "+" : ""}` : "…"} Icon={ShoppingBag} />
+            <Stat label="Need work" value={String(unwritten)} tone={unwritten ? "warn" : "calm"} Icon={Pencil} />
+          </>
+        )}
       </section>
 
       {/* ── the notice board ─────────────────────────────────────────────── */}
@@ -211,8 +220,8 @@ export function ShopDesk(props: {
         ))}
       </nav>
 
-      {tab === "queue" ? <Queue orders={orders} accent={accent} busy={busy} run={run} op={op} refreshOrders={refreshOrders} can={can ?? null} /> : null}
-      {tab === "shelves" ? (
+      {shown === "queue" ? <Queue orders={orders} accent={accent} busy={busy} run={run} op={op} refreshOrders={refreshOrders} can={can ?? null} /> : null}
+      {shown === "shelves" ? (
         <Shelves
           products={products}
           accent={accent}
@@ -223,9 +232,9 @@ export function ShopDesk(props: {
           loadingMore={props.loadingMore}
         />
       ) : null}
-      {tab === "people" ? <People accent={accent} isOwner={isOwner} op={op} busy={busy} run={run} /> : null}
-      {tab === "till" ? <Till accent={accent} op={op} /> : null}
-      {tab === "look" ? <Look accent={accent} look={props.look} instanceName={instanceName} canEdit={canEdit} op={op} busy={busy} run={run} /> : null}
+      {shown === "people" ? <People accent={accent} isOwner={isOwner} op={op} busy={busy} run={run} /> : null}
+      {shown === "till" ? <Till accent={accent} op={op} /> : null}
+      {shown === "look" ? <Look accent={accent} look={props.look} instanceName={instanceName} canEdit={canEdit} op={op} busy={busy} run={run} /> : null}
 
       {editing ? (
         <Editor

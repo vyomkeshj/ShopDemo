@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "shop-demo",
   "name": "Shop (demo)",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "The SDK's reference app \u2014 the smallest thing that touches every access capability once: a catalogue anyone may browse, orders a signed-in customer places and sees only their own, a staff desk, and an owner who sets prices. Orders and addresses live in the app's own tables (plugin.json `db`), scoped by the platform; the catalogue version lives on the timeline.",
   "applicationType": "plugin_shop_demo",
   "entry": "app",

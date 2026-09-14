@@ -598,7 +598,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
             </>
           ) : null}
           <span className="rounded-full border border-stone-300/70 px-2.5 py-1 text-[11px] text-stone-500 dark:border-white/15 dark:text-stone-400">
-            you are: <span className="font-medium text-stone-700 dark:text-stone-200">{viewer.role}</span>
+            you are: <span className="font-medium text-stone-700 dark:text-stone-200">{(viewer as { customRole?: string | null }).customRole ?? viewer.role}</span>
             {!hasAccount ? " · not signed in" : ""}
           </span>
         </nav>
@@ -1083,7 +1083,7 @@ export function ShopDemoUi({ state }: { state: ShopDemoData }) {
         </p>
         <p className="max-w-sm text-[10.5px] leading-4 text-stone-400 dark:text-stone-500">
           The shelves, your basket and your orders are this shop&rsquo;s own — you are seeing them as{" "}
-          <span className="font-medium text-stone-500 dark:text-stone-400">{viewer.role}</span>. An assistant can do anything on this
+          <span className="font-medium text-stone-500 dark:text-stone-400">{(viewer as { customRole?: string | null }).customRole ?? viewer.role}</span>. An assistant can do anything on this
           page that you can.
         </p>
       </footer>
